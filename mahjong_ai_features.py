@@ -4,6 +4,9 @@ import torch
 
 # --- 定数と設定 (特徴量エンジニアリング用) ---
 
+# デフォルトの開始点数
+DEFAULT_STARTING_SCORES = [25000, 25000, 25000, 25000]
+
 # 37次元の牌表現（m0, p0, s0 を赤ドラとして扱う）
 # m0, m1-9, p0, p1-9, s0, s1-9, z1-7
 FEATURE_TILE_MAP = {
@@ -142,6 +145,7 @@ class StateEncoderV2:
         melds = [[], [], [], []] # 公開された副露
         ankan = [[], [], [], []] # 暗槓
         reach_status = [0] * 4
+        last_discard_info = None  # Track (player_id, tile_id) of most recent discard
 
         for i in range(1, log_index_in_kyoku + 1):
             move = self.kyoku_log[i]
@@ -160,6 +164,7 @@ class StateEncoderV2:
                 if tile_id is not None:
                     hands[p_id][tile_id] -= 1
                     rivers[p_id].append(tile_id)
+                    last_discard_info = (p_id, tile_id)  # Track most recent discard
                     if '*' in tile_str:
                         reach_status[p_id] = 1
 
@@ -267,7 +272,7 @@ class StateEncoderV2:
 
         # H. プレイヤースコア (1ch * 4人 = 4ch) - Player scores normalized
         # Note: qipai may not always have scores, use default if missing
-        scores = self.qipai.get('defen', [25000, 25000, 25000, 25000])
+        scores = self.qipai.get('defen', DEFAULT_STARTING_SCORES)
         for p_idx in player_indices:
             # Normalize score to 0-1 range (assuming typical range 0-100000)
             normalized_score = scores[p_idx] / 100000.0
@@ -324,18 +329,10 @@ class StateEncoderV2:
             final_tensor[ch_offset, :, :] = furiten_status[p_idx]
             ch_offset += 1
         
-        # N. 最終打牌情報 (7ch) - Last discard information (most recent across all players)
+        # N. 最終打牌情報 (7ch) - Last discard information (most recent)
         last_discard_37 = [0] * 37
-        # Find the most recent discard by checking which river is longest
-        # (assumes turns alternate in order, which is typical in the log)
-        max_river_len = 0
-        last_discard_player = -1
-        for p in range(4):
-            if rivers[p] and len(rivers[p]) > max_river_len:
-                max_river_len = len(rivers[p])
-                last_discard_player = p
-        if last_discard_player != -1:
-            last_tile = rivers[last_discard_player][-1]
+        if last_discard_info is not None:
+            _, last_tile = last_discard_info
             last_discard_37[last_tile] = 1
         last_discard_red = [last_discard_37[0], last_discard_37[10], last_discard_37[20]]
         last_discard_34 = self._convert_to_34_dim(last_discard_37)
@@ -357,14 +354,13 @@ class StateEncoderV2:
             ch_offset += 1
         
         # Q. ダブル立直可能性 (1ch) - Double riichi possibility
-        # Can only double riichi on first turn (before any calls/kans)
-        double_riichi_possible = 1.0 if log_index_in_kyoku == 1 else 0.0
-        final_tensor[ch_offset, :, :] = double_riichi_possible
-        ch_offset += 1
-        
         # R. 第一巡 (1ch) - First turn flag
+        # Both conditions are the same: can only occur on first turn
         is_first_turn = 1.0 if log_index_in_kyoku == 1 else 0.0
-        final_tensor[ch_offset, :, :] = is_first_turn
+        
+        final_tensor[ch_offset, :, :] = is_first_turn  # Q: Double riichi possible
+        ch_offset += 1
+        final_tensor[ch_offset, :, :] = is_first_turn  # R: First turn flag
         ch_offset += 1
         
         # S. 海底/河底近接 (1ch) - Haitei/Houtei proximity
