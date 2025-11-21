@@ -288,8 +288,10 @@ class StateEncoderV2:
         
         # J. 残り牌数 (1ch) - Remaining tiles in wall
         # Start with 70 tiles in wall (after initial deal), subtract drawn tiles
+        # Note: This is an approximation. A more accurate calculation would track
+        # actual draws and account for kans (which draw replacement tiles).
         initial_wall = 70
-        tiles_drawn = log_index_in_kyoku  # Approximation
+        tiles_drawn = log_index_in_kyoku  # Simple approximation: ~1 draw per turn
         remaining = max(0, initial_wall - tiles_drawn)
         final_tensor[ch_offset, :, :] = remaining / 70.0  # Normalized
         ch_offset += 1
@@ -354,13 +356,16 @@ class StateEncoderV2:
             ch_offset += 1
         
         # Q. ダブル立直可能性 (1ch) - Double riichi possibility
-        # R. 第一巡 (1ch) - First turn flag
-        # Both conditions are the same: can only occur on first turn
-        is_first_turn = 1.0 if log_index_in_kyoku == 1 else 0.0
-        
-        final_tensor[ch_offset, :, :] = is_first_turn  # Q: Double riichi possible
+        # Note: True double riichi detection would require tenpai calculation
+        # For now, we use a simplified heuristic: first turn AND no melds yet
+        no_melds_yet = all(len(melds[p]) == 0 for p in range(4))
+        double_riichi_possible = 1.0 if (log_index_in_kyoku == 1 and no_melds_yet) else 0.0
+        final_tensor[ch_offset, :, :] = double_riichi_possible
         ch_offset += 1
-        final_tensor[ch_offset, :, :] = is_first_turn  # R: First turn flag
+        
+        # R. 第一巡 (1ch) - First turn flag
+        is_first_turn = 1.0 if log_index_in_kyoku == 1 else 0.0
+        final_tensor[ch_offset, :, :] = is_first_turn
         ch_offset += 1
         
         # S. 海底/河底近接 (1ch) - Haitei/Houtei proximity
@@ -375,7 +380,8 @@ class StateEncoderV2:
             # Count dora in hand
             hand_37 = hands[p_idx]
             for dora_tile in dora_tiles:
-                dora_count += hand_37[dora_tile]
+                if dora_tile is not None and 0 <= dora_tile < 37:
+                    dora_count += hand_37[dora_tile]
             # Count dora in melds
             for meld in melds[p_idx]:
                 for tile in meld:
@@ -392,9 +398,10 @@ class StateEncoderV2:
         for i in range(37):
             unseen_37[i] -= visible_37[i]
             unseen_37[i] = max(0, unseen_37[i])
-        unseen_red = [unseen_37[0], unseen_37[10], unseen_37[20]]
+        # Normalize red tiles (max 1 each) and regular tiles (max 4 each)
+        unseen_red = [unseen_37[0] / 1.0, unseen_37[10] / 1.0, unseen_37[20] / 1.0]
         unseen_34 = self._convert_to_34_dim(unseen_37)
-        # Normalize to 0-1
+        # Normalize to 0-1 (regular tiles have max 4)
         for i in range(34):
             unseen_34[i] = unseen_34[i] / 4.0
         self._encode_tiles(final_tensor, ch_offset, unseen_34, unseen_red, is_red_channel=True)
