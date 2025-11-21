@@ -265,7 +265,7 @@ class StateEncoderV2:
         final_tensor[ch_offset, :, :] = self.qipai['lizhibang'] / 4.0 # 正規化
         ch_offset += 1
 
-        # H. プレイヤースコア (4ch * 4人 = 16ch) - Player scores normalized
+        # H. プレイヤースコア (1ch * 4人 = 4ch) - Player scores normalized
         # Note: qipai may not always have scores, use default if missing
         scores = self.qipai.get('defen', [25000, 25000, 25000, 25000])
         for p_idx in player_indices:
@@ -324,13 +324,19 @@ class StateEncoderV2:
             final_tensor[ch_offset, :, :] = furiten_status[p_idx]
             ch_offset += 1
         
-        # N. 最終打牌情報 (7ch) - Last discard information
+        # N. 最終打牌情報 (7ch) - Last discard information (most recent across all players)
         last_discard_37 = [0] * 37
+        # Find the most recent discard by checking which river is longest
+        # (assumes turns alternate in order, which is typical in the log)
+        max_river_len = 0
+        last_discard_player = -1
         for p in range(4):
-            if rivers[p]:
-                last_tile = rivers[p][-1]
-                last_discard_37[last_tile] = 1
-                break
+            if rivers[p] and len(rivers[p]) > max_river_len:
+                max_river_len = len(rivers[p])
+                last_discard_player = p
+        if last_discard_player != -1:
+            last_tile = rivers[last_discard_player][-1]
+            last_discard_37[last_tile] = 1
         last_discard_red = [last_discard_37[0], last_discard_37[10], last_discard_37[20]]
         last_discard_34 = self._convert_to_34_dim(last_discard_37)
         self._encode_tiles(final_tensor, ch_offset, last_discard_34, last_discard_red, is_red_channel=True)
@@ -351,8 +357,8 @@ class StateEncoderV2:
             ch_offset += 1
         
         # Q. ダブル立直可能性 (1ch) - Double riichi possibility
-        # Can only double riichi on first turn
-        double_riichi_possible = 1.0 if log_index_in_kyoku <= 1 else 0.0
+        # Can only double riichi on first turn (before any calls/kans)
+        double_riichi_possible = 1.0 if log_index_in_kyoku == 1 else 0.0
         final_tensor[ch_offset, :, :] = double_riichi_possible
         ch_offset += 1
         
@@ -426,10 +432,11 @@ class StateEncoderV2:
             self._encode_tiles(final_tensor, ch_offset, last_tile_34, last_tile_red, is_red_channel=True)
             ch_offset += 7
         
-        # Y. 連荘カウント (1ch) - Consecutive dealer wins
-        # This would track how many times dealer has won consecutively
-        renchan = self.qipai.get('changbang', 0)
-        final_tensor[ch_offset, :, :] = renchan / 5.0  # Normalized
+        # Y. 連荘カウント (1ch) - Consecutive dealer wins (honba count)
+        # Note: changbang in the data represents honba (本場), which includes
+        # both consecutive dealer wins and drawn games. This is correct usage.
+        honba = self.qipai.get('changbang', 0)
+        final_tensor[ch_offset, :, :] = honba / 5.0  # Normalized
         ch_offset += 1
         
         # Z. 各プレイヤーの副露数 (1ch * 4人 = 4ch) - Number of melds per player
