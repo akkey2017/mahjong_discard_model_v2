@@ -9,6 +9,7 @@ import argparse
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import random_split
 from tqdm import tqdm
 
 from dataset import MahjongDataset, create_dataloaders
@@ -184,7 +185,6 @@ def main():
     # Show inference demo
     if args.show_demo:
         # Get validation set for demo
-        from torch.utils.data import random_split
         generator = torch.Generator().manual_seed(42)
         train_size = int(len(discard_dataset) * 0.9)
         val_size = len(discard_dataset) - train_size

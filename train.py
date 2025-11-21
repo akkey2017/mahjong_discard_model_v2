@@ -57,8 +57,8 @@ def parse_args():
     parser.add_argument('--scheduler', type=str, default='cosine',
                        choices=['cosine', 'plateau', 'none'],
                        help='Learning rate scheduler')
-    parser.add_argument('--max-grad-norm', type=float, default=1.0,
-                       help='Maximum gradient norm for clipping (0 to disable)')
+    parser.add_argument('--max-grad-norm', type=float, default=None,
+                       help='Maximum gradient norm for clipping (None to disable)')
     
     # Regularization
     parser.add_argument('--early-stopping', type=int, default=0,
@@ -180,7 +180,7 @@ def main():
     print("="*60 + "\n")
     
     best_val_acc = 0.0
-    max_grad_norm = args.max_grad_norm if args.max_grad_norm > 0 else None
+    max_grad_norm = args.max_grad_norm  # Use None to disable clipping
     
     for epoch in range(args.epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")

@@ -344,13 +344,21 @@ def create_resnet_model(in_channels=380, num_classes=34, dropout=0.0):
 
 
 def create_vit_model(in_channels=380, num_classes=34, dropout=0.0):
-    """Create a Vision Transformer-based discard model."""
+    """
+    Create a Vision Transformer-based discard model.
+    
+    Note: Using patch_size=(1,1) creates 36 patches from the 4x9 input.
+    For different patch granularity, consider:
+    - patch_size=(1,3) for 12 patches (grouping by tile suits)
+    - patch_size=(2,3) for 6 patches (spatial grouping)
+    Adjust embed_dim and num_patches accordingly when changing patch_size.
+    """
     vit_params = {
         "in_channels": in_channels,
         "embed_dim": 256,
         "depth": 6,
         "heads": 8,
-        "patch_size": (1, 1),
+        "patch_size": (1, 1),  # Each position becomes a patch
         "dropout": dropout
     }
     backbone = VisionTransformer(**vit_params)

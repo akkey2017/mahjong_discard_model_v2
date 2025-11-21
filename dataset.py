@@ -5,7 +5,7 @@ Dataset handling for mahjong game records.
 import json
 import zipfile
 import torch
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, DataLoader, random_split
 from tqdm import tqdm
 
 from mahjong_ai_features import StateEncoderV2, _process_single_number, FEATURE_TILE_MAP
@@ -155,8 +155,6 @@ def create_dataloaders(dataset, train_ratio=0.9, batch_size=64, num_workers=2,
     Returns:
         Tuple of (train_loader, val_loader)
     """
-    from torch.utils.data import DataLoader, random_split
-    
     if len(dataset) == 0:
         raise ValueError("Dataset is empty")
     
