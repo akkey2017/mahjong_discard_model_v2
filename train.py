@@ -180,7 +180,6 @@ def main():
     print("="*60 + "\n")
     
     best_val_acc = 0.0
-    max_grad_norm = args.max_grad_norm  # Use None to disable clipping
     
     for epoch in range(args.epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")
@@ -188,7 +187,7 @@ def main():
         
         # Training
         train_loss = train_one_epoch(
-            model, train_loader, loss_fn, optimizer, device, max_grad_norm
+            model, train_loader, loss_fn, optimizer, device, args.max_grad_norm
         )
         
         # Validation

@@ -284,6 +284,12 @@ class VisionTransformer(nn.Module):
     def __init__(self, in_channels, embed_dim, depth, heads, patch_size=(1, 1), dropout=0.0):
         super().__init__()
         
+        # Validate patch_size
+        if not isinstance(patch_size, tuple) or len(patch_size) != 2:
+            raise ValueError("patch_size must be a tuple of length 2")
+        if patch_size[0] <= 0 or patch_size[1] <= 0:
+            raise ValueError("patch_size components must be positive integers")
+        
         self.patch_embed = PatchEmbedding(in_channels, embed_dim, patch_size)
         
         # Positional embedding for 4x9 board after patching
