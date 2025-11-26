@@ -201,8 +201,9 @@ def train_one_epoch(model, train_loader, loss_fn, optimizer, device, max_grad_no
         num_batches += 1
         
         # Update progress bar with current loss
-        avg_loss = total_loss / num_batches
-        pbar.set_postfix(loss=f"{avg_loss:.4f}")
+        if num_batches > 0:
+            avg_loss = total_loss / num_batches
+            pbar.set_postfix(loss=f"{avg_loss:.4f}")
     
     return total_loss / num_batches if num_batches > 0 else 0.0
 
@@ -249,8 +250,9 @@ def evaluate(model, val_loader, loss_fn, device, metrics=None):
                         metric.update(out, yb)
             
             # Update progress bar with current loss
-            avg_loss = total_loss / num_batches
-            pbar.set_postfix(loss=f"{avg_loss:.4f}")
+            if num_batches > 0:
+                avg_loss = total_loss / num_batches
+                pbar.set_postfix(loss=f"{avg_loss:.4f}")
     
     results = {'loss': total_loss / num_batches if num_batches > 0 else 0.0}
     
