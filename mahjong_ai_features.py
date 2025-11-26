@@ -4,6 +4,9 @@ import torch
 
 # --- 定数と設定 (特徴量エンジニアリング用) ---
 
+# デフォルトの開始点数
+DEFAULT_STARTING_SCORES = [25000, 25000, 25000, 25000]
+
 # 37次元の牌表現（m0, p0, s0 を赤ドラとして扱う）
 # m0, m1-9, p0, p1-9, s0, s1-9, z1-7
 FEATURE_TILE_MAP = {
@@ -86,8 +89,40 @@ def _process_single_number(tile_37: int) -> int:
 
 class StateEncoderV2:
     """
-    `make_data.ipynb`のロジックに基づき、ゲーム状態を (380, 4, 9) のテンソルに変換する。
+    ゲーム状態を (380, 4, 9) のテンソルに変換する特徴量エンコーダ。
     次元: (チャンネル, 牌の種類, 牌の数)
+    
+    チャンネル構成 (合計380ch):
+    A. 手牌 (7ch × 4人 = 28ch)
+    B. 副露 (16ch × 4人 = 64ch)
+    C. 暗槓 (4ch × 4人 = 16ch)
+    D. 河/捨て牌 (7ch × 4人 = 28ch)
+    E. リーチ状態 (1ch × 4人 = 4ch)
+    F. ドラ (4ch)
+    G. 局情報 (場風3ch + 局数4ch + 本場1ch + 供託1ch = 9ch)
+    H. プレイヤースコア (1ch × 4人 = 4ch)
+    I. 自風/座席風 (4ch × 4人 = 16ch)
+    J. 残り牌数 (1ch)
+    K. 見えている牌 (7ch)
+    L. 裏ドラ表示牌候補 (4ch)
+    M. フリテン状態 (1ch × 4人 = 4ch)
+    N. 最終打牌情報 (7ch)
+    O. リーチ宣言巡目 (1ch × 4人 = 4ch)
+    P. 一発可能性 (1ch × 4人 = 4ch)
+    Q. ダブル立直可能性 (1ch)
+    R. 第一巡フラグ (1ch)
+    S. 海底/河底近接 (1ch)
+    T. ドラ枚数 (1ch × 4人 = 4ch)
+    U. 各牌の残り枚数 (7ch)
+    V. 現物/安全牌 (7ch × 4人 = 28ch)
+    W. 巡目 (1ch)
+    X. 各プレイヤーの最終打牌 (7ch × 4人 = 28ch)
+    Y. 連荘カウント (1ch)
+    Z. 各プレイヤーの副露数 (1ch × 4人= 4ch)
+    残り: 将来の拡張用 (向聴数、役可能性、詳細な筋分析など)
+    
+    合計: 28+64+16+28+4+4+9+4+16+1+7+4+4+7+4+4+1+1+1+4+7+28+1+28+1+4 = 280ch
+    (残り100chは将来の機能拡張用として予約)
     """
 
     def __init__(self, kyoku_log, player_id):
@@ -110,6 +145,7 @@ class StateEncoderV2:
         melds = [[], [], [], []] # 公開された副露
         ankan = [[], [], [], []] # 暗槓
         reach_status = [0] * 4
+        last_discard_info = None  # Track (player_id, tile_id) of most recent discard
 
         for i in range(1, log_index_in_kyoku + 1):
             move = self.kyoku_log[i]
@@ -128,6 +164,7 @@ class StateEncoderV2:
                 if tile_id is not None:
                     hands[p_id][tile_id] -= 1
                     rivers[p_id].append(tile_id)
+                    last_discard_info = (p_id, tile_id)  # Track most recent discard
                     if '*' in tile_str:
                         reach_status[p_id] = 1
 
@@ -196,10 +233,6 @@ class StateEncoderV2:
             self._encode_melds(final_tensor, ch_offset, player_ankans, is_ankan=True)
             ch_offset += 4
 
-        # ... (以降の特徴量も同様にエンコード) ...
-        # NOTE: ipynbの全ての特徴量を実装すると非常に長大になるため、主要なものに絞っています。
-        #       必要に応じてここに追加してください。
-        
         # D. 河 (捨て牌) (7ch * 4人 = 28ch)
         for p_idx in player_indices:
             river_37 = [0] * 37
@@ -237,7 +270,187 @@ class StateEncoderV2:
         final_tensor[ch_offset, :, :] = self.qipai['lizhibang'] / 4.0 # 正規化
         ch_offset += 1
 
-        # 残りのチャンネルは0埋め
+        # H. プレイヤースコア (1ch * 4人 = 4ch) - Player scores normalized
+        # Note: qipai may not always have scores, use default if missing
+        scores = self.qipai.get('defen', DEFAULT_STARTING_SCORES)
+        for p_idx in player_indices:
+            # Normalize score to 0-1 range (assuming typical range 0-100000)
+            normalized_score = scores[p_idx] / 100000.0
+            final_tensor[ch_offset, :, :] = normalized_score
+            ch_offset += 1
+        
+        # I. 自風 (座席風) (4ch * 4人 = 16ch) - Player seat winds (one-hot)
+        # Each player has a seat wind: East=0, South=1, West=2, North=3
+        for p_idx in player_indices:
+            seat_wind = (self.qipai['jushu'] + p_idx) % 4
+            final_tensor[ch_offset + seat_wind, :, :] = 1.0
+            ch_offset += 4
+        
+        # J. 残り牌数 (1ch) - Remaining tiles in wall
+        # Start with 70 tiles in wall (after initial deal), subtract drawn tiles
+        # Note: This is an approximation. A more accurate calculation would track
+        # actual draws and account for kans (which draw replacement tiles).
+        initial_wall = 70
+        tiles_drawn = log_index_in_kyoku  # Simple approximation: ~1 draw per turn
+        remaining = max(0, initial_wall - tiles_drawn)
+        final_tensor[ch_offset, :, :] = remaining / 70.0  # Normalized
+        ch_offset += 1
+        
+        # K. 見えている牌 (7ch) - Visible tiles (from all rivers and melds)
+        visible_37 = [0] * 37
+        for p in range(4):
+            for tile in rivers[p]:
+                visible_37[tile] += 1
+            for meld in melds[p]:
+                for tile in meld:
+                    visible_37[tile] += 1
+            for kan in ankan[p]:
+                # Note: Ankan tiles are visible for dora but not for safety calculations
+                for tile in kan:
+                    visible_37[tile] += 1
+        visible_red = [visible_37[0], visible_37[10], visible_37[20]]
+        visible_34 = self._convert_to_34_dim(visible_37)
+        self._encode_tiles(final_tensor, ch_offset, visible_34, visible_red, is_red_channel=True)
+        ch_offset += 7
+        
+        # L. 裏ドラ表示牌候補 (4ch) - Ura-dora indicators (only meaningful after riichi)
+        # For now, encode as same structure as dora but could be enhanced
+        # In actual game, ura-dora is hidden until win
+        ura_dora_34 = [0] * 34  # Placeholder - not visible during game
+        self._encode_tiles(final_tensor, ch_offset, ura_dora_34, [0,0,0], is_red_channel=False)
+        ch_offset += 4
+        
+        # M. フリテン状態 (1ch * 4人 = 4ch) - Furiten status
+        # Simplified: check if any riichi player has discarded their winning tile
+        furiten_status = [0] * 4
+        # This would require winning tile detection - simplified for now
+        for p_idx in player_indices:
+            if reach_status[p_idx] == 1:
+                # In full implementation, would check if waiting tiles are in own river
+                pass
+            final_tensor[ch_offset, :, :] = furiten_status[p_idx]
+            ch_offset += 1
+        
+        # N. 最終打牌情報 (7ch) - Last discard information (most recent)
+        last_discard_37 = [0] * 37
+        if last_discard_info is not None:
+            _, last_tile = last_discard_info
+            last_discard_37[last_tile] = 1
+        last_discard_red = [last_discard_37[0], last_discard_37[10], last_discard_37[20]]
+        last_discard_34 = self._convert_to_34_dim(last_discard_37)
+        self._encode_tiles(final_tensor, ch_offset, last_discard_34, last_discard_red, is_red_channel=True)
+        ch_offset += 7
+        
+        # O. リーチ宣言巡目 (1ch * 4人 = 4ch) - Turn when riichi was declared
+        riichi_turn = [0] * 4
+        # Would need to track when riichi was declared
+        for p_idx in player_indices:
+            final_tensor[ch_offset, :, :] = riichi_turn[p_idx] / 18.0  # Normalized (max ~18 turns)
+            ch_offset += 1
+        
+        # P. 一発可能性 (1ch * 4人 = 4ch) - Ippatsu possibility
+        ippatsu = [0] * 4
+        # Would be 1 if within 1 turn of riichi and no interruptions
+        for p_idx in player_indices:
+            final_tensor[ch_offset, :, :] = ippatsu[p_idx]
+            ch_offset += 1
+        
+        # Q. ダブル立直可能性 (1ch) - Double riichi possibility
+        # Note: True double riichi detection would require tenpai calculation
+        # For now, we use a simplified heuristic: first turn AND no melds yet
+        no_melds_yet = all(len(melds[p]) == 0 for p in range(4))
+        double_riichi_possible = 1.0 if (log_index_in_kyoku == 1 and no_melds_yet) else 0.0
+        final_tensor[ch_offset, :, :] = double_riichi_possible
+        ch_offset += 1
+        
+        # R. 第一巡 (1ch) - First turn flag
+        is_first_turn = 1.0 if log_index_in_kyoku == 1 else 0.0
+        final_tensor[ch_offset, :, :] = is_first_turn
+        ch_offset += 1
+        
+        # S. 海底/河底近接 (1ch) - Haitei/Houtei proximity
+        # Flag if close to last tile
+        is_near_end = 1.0 if remaining < 5 else 0.0
+        final_tensor[ch_offset, :, :] = is_near_end
+        ch_offset += 1
+        
+        # T. ドラ枚数 (各プレイヤーの手牌・副露中) (1ch * 4人 = 4ch)
+        for p_idx in player_indices:
+            dora_count = 0
+            # Count dora in hand
+            hand_37 = hands[p_idx]
+            for dora_tile in dora_tiles:
+                if dora_tile is not None and 0 <= dora_tile < 37:
+                    dora_count += hand_37[dora_tile]
+            # Count dora in melds
+            for meld in melds[p_idx]:
+                for tile in meld:
+                    if tile in dora_tiles:
+                        dora_count += 1
+            final_tensor[ch_offset, :, :] = dora_count / 10.0  # Normalized
+            ch_offset += 1
+        
+        # U. 各牌種の残り枚数 (見えていない牌) (7ch) - Remaining tile counts
+        unseen_37 = [4, 4, 4, 4, 4, 4, 4, 4, 4,  # m1-m9
+                     1, 4, 4, 4, 4, 4, 4, 4, 4, 4,  # m0(red 5), p1-p9
+                     1, 4, 4, 4, 4, 4, 4, 4, 4, 4,  # p0(red 5), s1-s9
+                     1, 4, 4, 4, 4, 4, 4, 4]  # s0(red 5), z1-z7
+        for i in range(37):
+            unseen_37[i] -= visible_37[i]
+            unseen_37[i] = max(0, unseen_37[i])
+        # Normalize red tiles (max 1 each) and regular tiles (max 4 each)
+        unseen_red = [unseen_37[0] / 1.0, unseen_37[10] / 1.0, unseen_37[20] / 1.0]
+        unseen_34 = self._convert_to_34_dim(unseen_37)
+        # Normalize to 0-1 (regular tiles have max 4)
+        for i in range(34):
+            unseen_34[i] = unseen_34[i] / 4.0
+        self._encode_tiles(final_tensor, ch_offset, unseen_34, unseen_red, is_red_channel=True)
+        ch_offset += 7
+        
+        # V. 現物 (安全牌) - Genbutsu (completely safe tiles) (7ch * 4人 = 28ch)
+        # For each player, tiles they've already discarded are safe to them
+        for p_idx in player_indices:
+            genbutsu_37 = [0] * 37
+            # Only meaningful if player is in riichi
+            if reach_status[p_idx] == 1:
+                for tile in rivers[p_idx]:
+                    genbutsu_37[tile] = 1
+            genbutsu_red = [genbutsu_37[0], genbutsu_37[10], genbutsu_37[20]]
+            genbutsu_34 = self._convert_to_34_dim(genbutsu_37)
+            self._encode_tiles(final_tensor, ch_offset, genbutsu_34, genbutsu_red, is_red_channel=True)
+            ch_offset += 7
+        
+        # W. 巡目 (Turn number) (1ch)
+        turn_number = log_index_in_kyoku
+        final_tensor[ch_offset, :, :] = turn_number / 20.0  # Normalized (typical game ~20 turns)
+        ch_offset += 1
+        
+        # X. 各プレイヤーが最後に捨てた牌 (7ch * 4人 = 28ch)
+        for p_idx in player_indices:
+            last_tile_37 = [0] * 37
+            if rivers[p_idx]:
+                last_tile_37[rivers[p_idx][-1]] = 1
+            last_tile_red = [last_tile_37[0], last_tile_37[10], last_tile_37[20]]
+            last_tile_34 = self._convert_to_34_dim(last_tile_37)
+            self._encode_tiles(final_tensor, ch_offset, last_tile_34, last_tile_red, is_red_channel=True)
+            ch_offset += 7
+        
+        # Y. 連荘カウント (1ch) - Consecutive dealer wins (honba count)
+        # Note: changbang in the data represents honba (本場), which includes
+        # both consecutive dealer wins and drawn games. This is correct usage.
+        honba = self.qipai.get('changbang', 0)
+        final_tensor[ch_offset, :, :] = honba / 5.0  # Normalized
+        ch_offset += 1
+        
+        # Z. 各プレイヤーの副露数 (1ch * 4人 = 4ch) - Number of melds per player
+        for p_idx in player_indices:
+            num_melds = len(melds[p_idx])
+            final_tensor[ch_offset, :, :] = num_melds / 4.0  # Normalized (max 4 melds)
+            ch_offset += 1
+        
+        # 残りのチャンネルは0埋め (将来の拡張用)
+        # Remaining channels left as zeros for future enhancements
+        # Such as: shanten number, yaku potential, detailed suji analysis, etc.
         
         return torch.from_numpy(final_tensor)
 
