@@ -5,6 +5,7 @@ Utility functions for training and evaluation.
 import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from tqdm import tqdm
 
 
 class TopKAccuracy:
@@ -181,7 +182,8 @@ def train_one_epoch(model, train_loader, loss_fn, optimizer, device, max_grad_no
     total_loss = 0.0
     num_batches = 0
     
-    for xb, yb, _ in train_loader:
+    pbar = tqdm(train_loader, desc="Training", leave=False)
+    for xb, yb, _ in pbar:
         xb, yb = xb.to(device), yb.to(device)
         
         optimizer.zero_grad()
@@ -197,6 +199,10 @@ def train_one_epoch(model, train_loader, loss_fn, optimizer, device, max_grad_no
         
         total_loss += loss.item()
         num_batches += 1
+        
+        # Update progress bar with current loss
+        avg_loss = total_loss / num_batches
+        pbar.set_postfix(loss=f"{avg_loss:.4f}")
     
     return total_loss / num_batches if num_batches > 0 else 0.0
 
@@ -225,8 +231,9 @@ def evaluate(model, val_loader, loss_fn, device, metrics=None):
             if hasattr(metric, 'reset'):
                 metric.reset()
     
+    pbar = tqdm(val_loader, desc="Evaluating", leave=False)
     with torch.no_grad():
-        for xb, yb, _ in val_loader:
+        for xb, yb, _ in pbar:
             xb, yb = xb.to(device), yb.to(device)
             
             out = model(xb)
@@ -240,6 +247,10 @@ def evaluate(model, val_loader, loss_fn, device, metrics=None):
                 for metric in metrics.values():
                     if hasattr(metric, 'update'):
                         metric.update(out, yb)
+            
+            # Update progress bar with current loss
+            avg_loss = total_loss / num_batches
+            pbar.set_postfix(loss=f"{avg_loss:.4f}")
     
     results = {'loss': total_loss / num_batches if num_batches > 0 else 0.0}
     
