@@ -129,6 +129,17 @@ def create_wall(seed=None):
     return wall
 
 
+def tile_sort_key(tile_id):
+    """Get sort key for a tile ID for consistent hand display."""
+    # Sort by suit (m=0, p=1, s=2, z=3) then by number (red 5 sorts as 5)
+    return (tile_id // 10, tile_id % 10 if tile_id % 10 != 0 else 5)
+
+
+def sort_tiles(tiles):
+    """Sort a list of tile IDs for consistent display."""
+    return sorted(tiles, key=tile_sort_key)
+
+
 def deal_initial_hand(wall, player_count=1):
     """
     Deal initial hands from the wall.
@@ -150,7 +161,7 @@ def deal_initial_hand(wall, player_count=1):
     
     # Sort hands for display
     for hand in hands:
-        hand.sort(key=lambda x: (x // 10, x % 10 if x % 10 != 0 else 5))
+        hand.sort(key=tile_sort_key)
     
     return hands
 
@@ -166,7 +177,7 @@ def format_hand(hand, use_compact=False):
     """Format a hand for display."""
     display_map = TILE_COMPACT if use_compact else TILE_DISPLAY
     tiles = []
-    for tile_id in sorted(hand, key=lambda x: (x // 10, x % 10 if x % 10 != 0 else 5)):
+    for tile_id in sort_tiles(hand):
         tile_str = ID_37_TO_TILE[tile_id]
         tiles.append(display_map.get(tile_str, tile_str))
     return " ".join(tiles)
@@ -272,23 +283,18 @@ def encode_state_for_ai(hand, discards, dora_indicator, turn=1, wall_remaining=7
     ch_offset += 4
     
     # F. Dora (4ch)
-    dora_37 = [0] * 37
     if dora_indicator is not None:
-        # Calculate actual dora from indicator
+        # Calculate actual dora from indicator and encode directly
         dora_id = calculate_dora(dora_indicator)
         if dora_id is not None:
-            dora_37[dora_id] = 1
-    dora_34 = [0] * 34
-    for i, count in enumerate(dora_37):
-        if count > 0:
-            dora_34[id_37_to_34(i)] += count
-    for suit in range(3):
-        for num in range(9):
-            if dora_34[suit * 9 + num] > 0:
+            dora_34_idx = id_37_to_34(dora_id)
+            # Encode dora position in tensor
+            if dora_34_idx < 27:  # Number tiles (m, p, s)
+                suit = dora_34_idx // 9
+                num = dora_34_idx % 9
                 tensor[ch_offset, suit, num] = 1.0
-    for i in range(7):
-        if dora_34[27 + i] > 0:
-            tensor[ch_offset, 3, i] = 1.0
+            else:  # Honor tiles
+                tensor[ch_offset, 3, dora_34_idx - 27] = 1.0
     ch_offset += 4
     
     # G. Round info (9ch)
@@ -461,7 +467,11 @@ def get_ai_discard(model, state_tensor, hand, device, top_k=5):
             break
     
     if chosen_34 is None:
-        # Fallback: pick random tile from hand
+        # Fallback: pick random tile from hand (should be extremely rare)
+        # This could happen if model outputs are corrupted or hand is empty
+        import sys
+        print("⚠️ Warning: No valid tile prediction found, using random selection", 
+              file=sys.stderr)
         chosen_34 = id_37_to_34(random.choice(hand))
     
     # Convert chosen 34-dim ID back to 37-dim (prefer red if available)
@@ -582,7 +592,7 @@ def run_single_player_game(model, device, max_turns=18, seed=None, verbose=True,
                     break
         
         # Sort hand for nicer display
-        hand.sort(key=lambda x: (x // 10, x % 10 if x % 10 != 0 else 5))
+        hand.sort(key=tile_sort_key)
     
     if verbose:
         print("-" * 70)
@@ -662,6 +672,20 @@ def main():
             raise ValueError(f"Unknown model type: {args.model_type}")
         
         state_dict = torch.load(args.model_path, map_location=device, weights_only=True)
+        
+        # Validate that the state dict keys match the model architecture
+        model_keys = set(model.state_dict().keys())
+        loaded_keys = set(state_dict.keys())
+        if model_keys != loaded_keys:
+            missing = model_keys - loaded_keys
+            extra = loaded_keys - model_keys
+            error_msg = []
+            if missing:
+                error_msg.append(f"Missing keys: {list(missing)[:5]}...")
+            if extra:
+                error_msg.append(f"Extra keys: {list(extra)[:5]}...")
+            raise RuntimeError(f"Model architecture mismatch. {' '.join(error_msg)}")
+        
         model.load_state_dict(state_dict)
         model.to(device)
         model.eval()
@@ -693,7 +717,8 @@ def main():
             print(f"# Game {game_num + 1} / {args.games}")
             print(f"{'#' * 70}")
         
-        seed = args.seed + game_num if args.seed is not None else None
+        # Use a robust seed derivation to avoid correlation between consecutive games
+        seed = (args.seed * 10000 + game_num) if args.seed is not None else None
         result = run_single_player_game(
             model, device,
             max_turns=args.turns,
