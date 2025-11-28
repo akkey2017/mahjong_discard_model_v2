@@ -9,6 +9,7 @@ import argparse
 import os
 import random
 import re
+import sys
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -461,16 +462,18 @@ def get_ai_discard(model, state_tensor, hand, device, top_k=5):
         
         # Get top-k predictions (now all will be valid tiles in hand)
         actual_k = min(top_k, len(hand_34_set))
-        top_probs, top_indices = torch.topk(probabilities, actual_k)
-        predictions = [
-            (idx.item(), prob.item())
-            for idx, prob in zip(top_indices, top_probs)
-        ]
+        if actual_k > 0:
+            top_probs, top_indices = torch.topk(probabilities, actual_k)
+            predictions = [
+                (idx.item(), prob.item())
+                for idx, prob in zip(top_indices, top_probs)
+            ]
+        else:
+            predictions = []
     
     if not predictions:
         # Fallback: pick random tile from hand (should be extremely rare)
         # This could happen if hand is empty
-        import sys
         print("⚠️ Warning: No valid tile prediction found, using random selection", 
               file=sys.stderr)
         chosen_34 = id_37_to_34(random.choice(hand))
