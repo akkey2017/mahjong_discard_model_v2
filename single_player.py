@@ -627,6 +627,9 @@ def infer_model_type_from_path(model_path):
     treating common separators (_, -, .) as word boundaries to avoid false
     positives (e.g., 'vitamin' won't match 'vit').
     
+    Note: If multiple model types appear in the filename (e.g., 'coatnet_vit_hybrid.pth'),
+    the order of precedence is: vit > resnet > coatnet.
+    
     Args:
         model_path: Path to the model file
         
@@ -636,9 +639,9 @@ def infer_model_type_from_path(model_path):
     filename = os.path.basename(model_path).lower()
     
     # Split on common separators (underscore, hyphen, dot) to get words
-    words = re.split(r'[_\-.]', filename)
+    words = re.split(r'[_.-]', filename)
     
-    # Check for exact word matches
+    # Check for exact word matches (precedence: vit > resnet > coatnet)
     if 'vit' in words:
         return 'vit'
     elif 'resnet' in words:
@@ -749,6 +752,7 @@ def main():
             model = create_vit_model(dropout=0.0)
         else:
             # Should not reach here, but fallback to coatnet as default
+            print(f"⚠️  Unexpected model type '{model_type}', falling back to 'coatnet'")
             model = create_coatnet_model(dropout=0.0)
         model.to(device)
         model.eval()
