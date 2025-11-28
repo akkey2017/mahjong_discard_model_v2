@@ -14,6 +14,11 @@ mahjong_discard_model_v2/
 ├── single_player.py             # 一人麻雀シミュレーション（AIプレイ観察）
 ├── mahjong_ai_features.py       # 特徴量エンコーダ
 ├── mahjong_ai_coatnet_v2.py    # 旧トレーニングスクリプト（リファクタリング済み）
+├── sequential_models/           # 🆕 シーケンスモデル（一局の流れを学習）
+│   ├── sequence_models.py       # LSTM/Transformerモデル
+│   ├── sequence_dataset.py      # シーケンスデータセット
+│   ├── sequence_train.py        # シーケンスモデル用トレーニング
+│   └── README.md                # 詳細ドキュメント
 └── README.md                    # このファイル
 ```
 
@@ -21,6 +26,7 @@ mahjong_discard_model_v2/
 
 ### サポートされるモデルアーキテクチャ
 
+#### 従来モデル（1ステップ予測）
 1. **CoAtNet** (デフォルト)
    - 畳み込みとTransformerを組み合わせたハイブリッドモデル
    - 局所的特徴と大域的依存関係の両方を効果的に学習
@@ -33,6 +39,17 @@ mahjong_discard_model_v2/
    - 純粋なTransformerベースのモデル
    - パッチベースの処理で大域的な関係性を捉える
 
+#### 🆕 シーケンスモデル（一局の流れを学習）
+4. **LSTM Sequential Model**
+   - LSTMを用いた時系列モデル
+   - 一局を通じての打牌シーケンスを学習
+   - 過去のターンの文脈を保持
+
+5. **Transformer Sequential Model**
+   - Transformer Decoderを用いた自己回帰モデル
+   - Self-Attentionで全ステップ間の関係を学習
+   - 長い依存関係を効果的に捉える
+
 ### 機能強化
 
 - ✅ **学習率スケジューリング**: Cosine Annealing、ReduceLROnPlateauをサポート
@@ -43,6 +60,7 @@ mahjong_discard_model_v2/
 - ✅ **コマンドライン引数**: 柔軟な設定変更
 - ✅ **エラーハンドリング**: 堅牢なエラー処理
 - ✅ **一人麻雀シミュレーション**: AIの打牌判断をリアルタイムで観察
+- ✅ 🆕 **シーケンスモデル**: 一局の流れを学習するLSTM/Transformerモデル
 
 ## 🚀 使い方
 
@@ -147,6 +165,24 @@ python single_player.py \
 ```bash
 python mahjong_ai_coatnet_v2.py
 ```
+
+### 5. 🆕 シーケンスモデルのトレーニング
+
+一局の流れを学習するシーケンスモデルを使用する場合：
+
+#### LSTMモデル
+```bash
+cd sequential_models
+python sequence_train.py --model lstm --data ../data2023.zip --epochs 20
+```
+
+#### Transformerモデル
+```bash
+cd sequential_models
+python sequence_train.py --model transformer --data ../data2023.zip --epochs 30
+```
+
+詳細は [sequential_models/README.md](sequential_models/README.md) を参照してください。
 
 ## 📊 トレーニングパラメータ
 
