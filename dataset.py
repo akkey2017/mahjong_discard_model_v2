@@ -3,6 +3,7 @@ Dataset handling for mahjong game records.
 """
 
 import json
+import sys
 import zipfile
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
@@ -44,7 +45,8 @@ class MahjongDataset(Dataset):
                 
                 iterator = txts[:max_files]
                 if verbose:
-                    iterator = tqdm(iterator, desc="Loading game records")
+                    iterator = tqdm(iterator, desc="Loading game records",
+                                   file=sys.stderr, dynamic_ncols=True, mininterval=0.1)
                 
                 for name in iterator:
                     try:

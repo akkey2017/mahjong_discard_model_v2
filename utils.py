@@ -2,6 +2,7 @@
 Utility functions for training and evaluation.
 """
 
+import sys
 import torch
 import torch.nn as nn
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
@@ -182,7 +183,8 @@ def train_one_epoch(model, train_loader, loss_fn, optimizer, device, max_grad_no
     total_loss = 0.0
     num_batches = 0
     
-    pbar = tqdm(train_loader, desc="Training", leave=False)
+    pbar = tqdm(train_loader, desc="Training", leave=False, 
+                file=sys.stderr, dynamic_ncols=True, mininterval=0.1)
     for xb, yb, _ in pbar:
         xb, yb = xb.to(device), yb.to(device)
         
@@ -232,7 +234,8 @@ def evaluate(model, val_loader, loss_fn, device, metrics=None):
             if hasattr(metric, 'reset'):
                 metric.reset()
     
-    pbar = tqdm(val_loader, desc="Evaluating", leave=False)
+    pbar = tqdm(val_loader, desc="Evaluating", leave=False,
+                file=sys.stderr, dynamic_ncols=True, mininterval=0.1)
     with torch.no_grad():
         for xb, yb, _ in pbar:
             xb, yb = xb.to(device), yb.to(device)
