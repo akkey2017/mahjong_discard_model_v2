@@ -11,6 +11,7 @@ mahjong_discard_model_v2/
 ├── utils.py                     # トレーニング・評価ユーティリティ
 ├── train.py                     # メイントレーニングスクリプト
 ├── evaluate_model.py            # モデル評価スクリプト
+├── single_player.py             # 一人麻雀シミュレーション（AIプレイ観察）
 ├── mahjong_ai_features.py       # 特徴量エンコーダ
 ├── mahjong_ai_coatnet_v2.py    # 旧トレーニングスクリプト（リファクタリング済み）
 └── README.md                    # このファイル
@@ -41,6 +42,7 @@ mahjong_discard_model_v2/
 - ✅ **Dropout**: 過学習防止のための正則化
 - ✅ **コマンドライン引数**: 柔軟な設定変更
 - ✅ **エラーハンドリング**: 堅牢なエラー処理
+- ✅ **一人麻雀シミュレーション**: AIの打牌判断をリアルタイムで観察
 
 ## 🚀 使い方
 
@@ -103,7 +105,44 @@ python evaluate_model.py \
   --num-demo-samples 10
 ```
 
-### 3. 旧スクリプト（互換性のため）
+### 3. 一人麻雀シミュレーション（AIプレイ観察）
+
+一人麻雀モードでは、AIが実際にツモって打牌を選択する様子を観察できます。
+
+#### 基本的な使い方
+
+```bash
+python single_player.py --model-path discard_model_coatnet.pth
+```
+
+#### インタラクティブモード（ターンごとに一時停止）
+
+```bash
+python single_player.py --model-path discard_model_coatnet.pth --interactive
+```
+
+#### 複数ゲームをシミュレート
+
+```bash
+python single_player.py \
+  --model-path discard_model_coatnet.pth \
+  --games 5 \
+  --turns 18 \
+  --seed 42
+```
+
+#### パラメータ一覧
+
+- `--model-path`: 学習済みモデルファイルパス
+- `--model-type`: モデルアーキテクチャ（`coatnet`, `resnet`, `vit`）
+- `--turns`: 最大ターン数（デフォルト: 18）
+- `--games`: シミュレートするゲーム数（デフォルト: 1）
+- `--seed`: 乱数シード（再現性のため）
+- `--compact`: Unicode麻雀牌絵文字を使用
+- `--interactive`: インタラクティブモード（Enterキーで次のターンへ）
+- `--quiet`: サマリーのみ表示
+
+### 4. 旧スクリプト（互換性のため）
 
 ```bash
 python mahjong_ai_coatnet_v2.py
