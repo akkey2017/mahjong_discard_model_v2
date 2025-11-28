@@ -401,9 +401,6 @@ class StateEncoderV2:
         # Normalize red tiles (max 1 each) and regular tiles (max 4 each)
         unseen_red = [unseen_37[0] / 1.0, unseen_37[10] / 1.0, unseen_37[20] / 1.0]
         unseen_34 = self._convert_to_34_dim(unseen_37)
-        # Normalize to 0-1 (regular tiles have max 4)
-        for i in range(34):
-            unseen_34[i] = unseen_34[i] / 4.0
         self._encode_tiles(final_tensor, ch_offset, unseen_34, unseen_red, is_red_channel=True)
         ch_offset += 7
         
