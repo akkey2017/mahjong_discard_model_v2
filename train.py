@@ -237,14 +237,14 @@ def main():
     # Final save if not using save_best
     if not args.save_best:
         torch.save(model.state_dict(), args.output)
-        print(f"\nFinal model saved to {args.output}")
+        tqdm.write(f"\nFinal model saved to {args.output}", file=sys.stderr)
     
-    print("\n" + "="*60)
-    print("Training Complete")
-    print("="*60)
-    print(f"Best validation Top-3 accuracy: {best_val_acc:.4f}")
-    print(f"Model saved to: {args.output}")
-    print("="*60 + "\n")
+    tqdm.write("\n" + "="*60, file=sys.stderr)
+    tqdm.write("Training Complete", file=sys.stderr)
+    tqdm.write("="*60, file=sys.stderr)
+    tqdm.write(f"Best validation Top-3 accuracy: {best_val_acc:.4f}", file=sys.stderr)
+    tqdm.write(f"Model saved to: {args.output}", file=sys.stderr)
+    tqdm.write("="*60 + "\n", file=sys.stderr)
 
 
 if __name__ == '__main__':
