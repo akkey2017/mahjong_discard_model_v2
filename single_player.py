@@ -438,43 +438,45 @@ def get_ai_discard(model, state_tensor, hand, device, top_k=5):
     
     Returns:
         Tuple of (chosen_tile_id_37, predictions)
-        predictions is a list of (tile_id_34, probability)
+        predictions is a list of (tile_id_34, probability) for tiles in hand only
     """
     model.eval()
+    
+    # Build set of 34-dim tile IDs that are in hand
+    hand_34_set = set(id_37_to_34(tile_id) for tile_id in hand)
     
     with torch.no_grad():
         # Add batch dimension
         input_tensor = state_tensor.unsqueeze(0).to(device)
         output = model(input_tensor)
-        probabilities = F.softmax(output, dim=1)[0]
         
-        # Get top-k predictions
-        top_probs, top_indices = torch.topk(probabilities, top_k)
+        # Create mask: -inf for tiles not in hand, 0 for tiles in hand
+        mask = torch.full((34,), float('-inf'), device=device)
+        for tile_34 in hand_34_set:
+            mask[tile_34] = 0.0
+        
+        # Apply mask before softmax so invalid tiles get 0 probability
+        masked_output = output[0] + mask
+        probabilities = F.softmax(masked_output, dim=0)
+        
+        # Get top-k predictions (now all will be valid tiles in hand)
+        actual_k = min(top_k, len(hand_34_set))
+        top_probs, top_indices = torch.topk(probabilities, actual_k)
         predictions = [
             (idx.item(), prob.item())
             for idx, prob in zip(top_indices, top_probs)
         ]
     
-    # Find the highest-probability tile that's actually in hand
-    hand_34_set = set(id_37_to_34(tile_id) for tile_id in hand)
-    
-    # Get all probabilities and sort by probability
-    all_probs = [(i, probabilities[i].item()) for i in range(34)]
-    all_probs.sort(key=lambda x: x[1], reverse=True)
-    
-    chosen_34 = None
-    for tile_34, prob in all_probs:
-        if tile_34 in hand_34_set:
-            chosen_34 = tile_34
-            break
-    
-    if chosen_34 is None:
+    if not predictions:
         # Fallback: pick random tile from hand (should be extremely rare)
-        # This could happen if model outputs are corrupted or hand is empty
+        # This could happen if hand is empty
         import sys
         print("⚠️ Warning: No valid tile prediction found, using random selection", 
               file=sys.stderr)
         chosen_34 = id_37_to_34(random.choice(hand))
+    else:
+        # The top prediction is now guaranteed to be in hand
+        chosen_34 = predictions[0][0]
     
     # Convert chosen 34-dim ID back to 37-dim (prefer red if available)
     chosen_37 = None
