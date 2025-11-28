@@ -13,7 +13,7 @@ import argparse
 import sys
 import torch
 import torch.nn as nn
-from tqdm import tqdm
+from tqdm.auto import tqdm
 
 from dataset import MahjongDataset, create_dataloaders
 from models import create_coatnet_model, create_resnet_model, create_vit_model
@@ -186,8 +186,8 @@ def main():
         # Flush stdout and use tqdm.write for consistent output with progress bars
         sys.stdout.flush()
         sys.stderr.flush()
-        tqdm.write(f"Epoch {epoch+1}/{args.epochs}", file=sys.stderr)
-        tqdm.write("-" * 60, file=sys.stderr)
+        tqdm.write(f"Epoch {epoch+1}/{args.epochs}")
+        tqdm.write("-" * 60)
         
         # Training
         train_loss = train_one_epoch(
@@ -205,10 +205,10 @@ def main():
         val_top3 = val_metrics['top3_acc']
         
         # Print results using tqdm.write for consistency
-        tqdm.write(f"Train Loss: {train_loss:.4f}", file=sys.stderr)
-        tqdm.write(f"Val Loss:   {val_loss:.4f}", file=sys.stderr)
-        tqdm.write(f"Val Top-1:  {val_top1:.4f}", file=sys.stderr)
-        tqdm.write(f"Val Top-3:  {val_top3:.4f}", file=sys.stderr)
+        tqdm.write(f"Train Loss: {train_loss:.4f}")
+        tqdm.write(f"Val Loss:   {val_loss:.4f}")
+        tqdm.write(f"Val Top-1:  {val_top1:.4f}")
+        tqdm.write(f"Val Top-3:  {val_top3:.4f}")
         
         # Learning rate scheduling
         if scheduler is not None:
@@ -217,7 +217,7 @@ def main():
             else:
                 scheduler.step()
             current_lr = optimizer.param_groups[0]['lr']
-            tqdm.write(f"Learning Rate: {current_lr:.6f}", file=sys.stderr)
+            tqdm.write(f"Learning Rate: {current_lr:.6f}")
         
         # Save checkpoint
         checkpoint(model, {'top3_acc': val_top3, 'top1_acc': val_top1})
@@ -229,22 +229,22 @@ def main():
         # Early stopping
         if early_stopping is not None:
             if early_stopping(val_top3):
-                tqdm.write(f"\nEarly stopping triggered after epoch {epoch+1}", file=sys.stderr)
+                tqdm.write(f"\nEarly stopping triggered after epoch {epoch+1}")
                 break
         
-        tqdm.write("", file=sys.stderr)
+        tqdm.write("")
     
     # Final save if not using save_best
     if not args.save_best:
         torch.save(model.state_dict(), args.output)
-        tqdm.write(f"\nFinal model saved to {args.output}", file=sys.stderr)
+        tqdm.write(f"\nFinal model saved to {args.output}")
     
-    tqdm.write("\n" + "="*60, file=sys.stderr)
-    tqdm.write("Training Complete", file=sys.stderr)
-    tqdm.write("="*60, file=sys.stderr)
-    tqdm.write(f"Best validation Top-3 accuracy: {best_val_acc:.4f}", file=sys.stderr)
-    tqdm.write(f"Model saved to: {args.output}", file=sys.stderr)
-    tqdm.write("="*60 + "\n", file=sys.stderr)
+    tqdm.write("\n" + "="*60)
+    tqdm.write("Training Complete")
+    tqdm.write("="*60)
+    tqdm.write(f"Best validation Top-3 accuracy: {best_val_acc:.4f}")
+    tqdm.write(f"Model saved to: {args.output}")
+    tqdm.write("="*60 + "\n")
 
 
 if __name__ == '__main__':
