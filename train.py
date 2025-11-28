@@ -13,7 +13,7 @@ import argparse
 import sys
 import torch
 import torch.nn as nn
-from tqdm.auto import tqdm
+from tqdm import tqdm
 
 from dataset import MahjongDataset, create_dataloaders
 from models import create_coatnet_model, create_resnet_model, create_vit_model
