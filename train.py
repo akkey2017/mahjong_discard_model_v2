@@ -10,6 +10,7 @@ This script provides a clean, configurable training pipeline with support for:
 """
 
 import argparse
+import sys
 import torch
 import torch.nn as nn
 from tqdm import tqdm
@@ -182,8 +183,11 @@ def main():
     best_val_acc = 0.0
     
     for epoch in range(args.epochs):
-        print(f"Epoch {epoch+1}/{args.epochs}")
-        print("-" * 60)
+        # Flush stdout and use tqdm.write for consistent output with progress bars
+        sys.stdout.flush()
+        sys.stderr.flush()
+        tqdm.write(f"Epoch {epoch+1}/{args.epochs}", file=sys.stderr)
+        tqdm.write("-" * 60, file=sys.stderr)
         
         # Training
         train_loss = train_one_epoch(
@@ -200,11 +204,11 @@ def main():
         val_top1 = val_metrics['top1_acc']
         val_top3 = val_metrics['top3_acc']
         
-        # Print results
-        print(f"Train Loss: {train_loss:.4f}")
-        print(f"Val Loss:   {val_loss:.4f}")
-        print(f"Val Top-1:  {val_top1:.4f}")
-        print(f"Val Top-3:  {val_top3:.4f}")
+        # Print results using tqdm.write for consistency
+        tqdm.write(f"Train Loss: {train_loss:.4f}", file=sys.stderr)
+        tqdm.write(f"Val Loss:   {val_loss:.4f}", file=sys.stderr)
+        tqdm.write(f"Val Top-1:  {val_top1:.4f}", file=sys.stderr)
+        tqdm.write(f"Val Top-3:  {val_top3:.4f}", file=sys.stderr)
         
         # Learning rate scheduling
         if scheduler is not None:
@@ -213,7 +217,7 @@ def main():
             else:
                 scheduler.step()
             current_lr = optimizer.param_groups[0]['lr']
-            print(f"Learning Rate: {current_lr:.6f}")
+            tqdm.write(f"Learning Rate: {current_lr:.6f}", file=sys.stderr)
         
         # Save checkpoint
         checkpoint(model, {'top3_acc': val_top3, 'top1_acc': val_top1})
@@ -225,10 +229,10 @@ def main():
         # Early stopping
         if early_stopping is not None:
             if early_stopping(val_top3):
-                print(f"\nEarly stopping triggered after epoch {epoch+1}")
+                tqdm.write(f"\nEarly stopping triggered after epoch {epoch+1}", file=sys.stderr)
                 break
         
-        print()
+        tqdm.write("", file=sys.stderr)
     
     # Final save if not using save_best
     if not args.save_best:

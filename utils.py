@@ -111,7 +111,8 @@ class ModelCheckpoint:
         
         if should_save:
             torch.save(model.state_dict(), self.filepath)
-            print(f"Model checkpoint saved to {self.filepath} ({self.monitor}={score:.4f})")
+            tqdm.write(f"Model checkpoint saved to {self.filepath} ({self.monitor}={score:.4f})",
+                       file=sys.stderr)
 
 
 def get_optimizer(model, optimizer_name='adamw', lr=1e-4, weight_decay=1e-2):
