@@ -617,6 +617,32 @@ def run_single_player_game(model, device, max_turns=18, seed=None, verbose=True,
 # ==================== Main Entry Point ====================
 
 
+def infer_model_type_from_path(model_path):
+    """
+    Infer model type from the model file path.
+    
+    Looks for architecture names (coatnet, resnet, vit) in the filename.
+    
+    Args:
+        model_path: Path to the model file
+        
+    Returns:
+        Inferred model type ('coatnet', 'resnet', 'vit') or None if not found
+    """
+    import os
+    filename = os.path.basename(model_path).lower()
+    
+    # Check for architecture names in the filename
+    if 'vit' in filename:
+        return 'vit'
+    elif 'resnet' in filename:
+        return 'resnet'
+    elif 'coatnet' in filename:
+        return 'coatnet'
+    
+    return None
+
+
 def parse_args():
     """Parse command line arguments."""
     parser = argparse.ArgumentParser(
@@ -625,9 +651,9 @@ def parse_args():
     
     parser.add_argument('--model-path', type=str, default='discard_model_coatnet.pth',
                        help='Path to trained model weights')
-    parser.add_argument('--model-type', type=str, default='coatnet',
+    parser.add_argument('--model-type', type=str, default=None,
                        choices=['coatnet', 'resnet', 'vit'],
-                       help='Model architecture type')
+                       help='Model architecture type (auto-detected from filename if not specified)')
     parser.add_argument('--device', type=str, default='auto',
                        help='Device to use (auto/cuda/cpu)')
     parser.add_argument('--turns', type=int, default=18,
@@ -658,18 +684,29 @@ def main():
     
     print(f"🖥️  Device: {device}")
     
+    # Determine model type: use explicit --model-type if provided, otherwise infer from filename
+    if args.model_type is not None:
+        model_type = args.model_type
+    else:
+        model_type = infer_model_type_from_path(args.model_path)
+        if model_type is None:
+            model_type = 'coatnet'  # Default fallback
+            print(f"⚠️  Could not infer model type from filename, defaulting to '{model_type}'")
+        else:
+            print(f"🔍 Auto-detected model type: {model_type}")
+    
     # Load model
     print(f"📂 Loading model from '{args.model_path}'...")
     
     try:
-        if args.model_type == 'coatnet':
+        if model_type == 'coatnet':
             model = create_coatnet_model(dropout=0.0)
-        elif args.model_type == 'resnet':
+        elif model_type == 'resnet':
             model = create_resnet_model(dropout=0.0)
-        elif args.model_type == 'vit':
+        elif model_type == 'vit':
             model = create_vit_model(dropout=0.0)
         else:
-            raise ValueError(f"Unknown model type: {args.model_type}")
+            raise ValueError(f"Unknown model type: {model_type}")
         
         state_dict = torch.load(args.model_path, map_location=device, weights_only=True)
         
@@ -698,9 +735,9 @@ def main():
         
         # Offer to run in demo mode
         print("\n🎮 Running in DEMO mode with untrained model...")
-        if args.model_type == 'coatnet':
+        if model_type == 'coatnet':
             model = create_coatnet_model(dropout=0.0)
-        elif args.model_type == 'resnet':
+        elif model_type == 'resnet':
             model = create_resnet_model(dropout=0.0)
         else:
             model = create_vit_model(dropout=0.0)
