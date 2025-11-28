@@ -12,16 +12,14 @@ Key differences from the original dataset:
 """
 
 import json
+import os
 import sys
 import zipfile
 import torch
 from torch.utils.data import Dataset, DataLoader, random_split
-from torch.nn.utils.rnn import pad_sequence
 from tqdm import tqdm
 
 # Import from parent module
-import os
-import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from mahjong_ai_features import StateEncoderV2, _process_single_number, FEATURE_TILE_MAP
 
