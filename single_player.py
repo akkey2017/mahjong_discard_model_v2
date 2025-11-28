@@ -6,7 +6,9 @@ in a simulated single-player mahjong game (一人麻雀).
 """
 
 import argparse
+import os
 import random
+import re
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -621,7 +623,9 @@ def infer_model_type_from_path(model_path):
     """
     Infer model type from the model file path.
     
-    Looks for architecture names (coatnet, resnet, vit) in the filename.
+    Looks for architecture names (coatnet, resnet, vit) in the filename,
+    treating common separators (_, -, .) as word boundaries to avoid false
+    positives (e.g., 'vitamin' won't match 'vit').
     
     Args:
         model_path: Path to the model file
@@ -629,15 +633,17 @@ def infer_model_type_from_path(model_path):
     Returns:
         Inferred model type ('coatnet', 'resnet', 'vit') or None if not found
     """
-    import os
     filename = os.path.basename(model_path).lower()
     
-    # Check for architecture names in the filename
-    if 'vit' in filename:
+    # Split on common separators (underscore, hyphen, dot) to get words
+    words = re.split(r'[_\-.]', filename)
+    
+    # Check for exact word matches
+    if 'vit' in words:
         return 'vit'
-    elif 'resnet' in filename:
+    elif 'resnet' in words:
         return 'resnet'
-    elif 'coatnet' in filename:
+    elif 'coatnet' in words:
         return 'coatnet'
     
     return None
@@ -739,8 +745,11 @@ def main():
             model = create_coatnet_model(dropout=0.0)
         elif model_type == 'resnet':
             model = create_resnet_model(dropout=0.0)
-        else:
+        elif model_type == 'vit':
             model = create_vit_model(dropout=0.0)
+        else:
+            # Should not reach here, but fallback to coatnet as default
+            model = create_coatnet_model(dropout=0.0)
         model.to(device)
         model.eval()
     except Exception as e:
