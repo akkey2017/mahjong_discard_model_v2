@@ -1,0 +1,29 @@
+# Advanced Training (Multi-ZIP + Large Models)
+
+Qiita記事の高パラメータ化を意識した実験用ワークスペースです。複数の学習用ZIPをまとめて読み込み、より大きなモデル（CNN/Transformer/CoAtNet）を学習できます。
+
+## 使い方
+
+```bash
+python advanced_training/train_large.py \
+  --data data2023.zip data2022.zip \
+  --model coatnet_large \
+  --epochs 15 \
+  --batch-size 96 \
+  --lr 8e-5 \
+  --save-best
+```
+
+### 主な引数
+- `--data`: 学習に使うZIPを複数指定可能（空白区切り）
+- `--max-files-per-zip`: 各ZIPから読む最大ファイル数
+- `--model`: `coatnet_large` / `resnet_large` / `vit_large`
+- その他: `--scheduler`, `--early-stopping`, `--max-grad-norm`, `--output` などは従来と同様
+
+## モデル
+- **CoAtNet Large**: チャネル幅・ブロック数を増やし、ヘッド数も拡大
+- **ResNet Large**: より深い層と広いチャネル幅
+- **ViT Large**: 512次元埋め込み・8層構成のTransformer
+
+## データ
+`advanced_training/multizip_dataset.py` で複数ZIPをまとめてロードし、元の特徴量エンコーダをそのまま利用します。集計はサンプル数とZIPごとの内訳を表示します。

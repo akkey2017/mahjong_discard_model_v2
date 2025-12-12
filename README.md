@@ -19,6 +19,10 @@ mahjong_discard_model_v2/
 │   ├── sequence_dataset.py      # シーケンスデータセット
 │   ├── sequence_train.py        # シーケンスモデル用トレーニング
 │   └── README.md                # 詳細ドキュメント
+├── advanced_training/           # 🧪 大規模モデル + 複数ZIP対応の実験用ワークスペース
+│   ├── train_large.py           # マルチZIP対応の大型モデル学習CLI
+│   ├── large_models.py          # パラメータ数を増やしたCNN/Transformer/CoAtNet
+│   └── multizip_dataset.py      # 複数ZIPの統合データセット
 └── README.md                    # このファイル
 ```
 
@@ -102,6 +106,16 @@ python train.py \
   --early-stopping 5 \
   --save-best \
   --output best_model.pth
+```
+
+#### 🧪 複数ZIP + 大型モデルでトレーニング
+
+```bash
+python advanced_training/train_large.py \
+  --data data2023.zip data2022.zip \
+  --model coatnet_large \
+  --epochs 15 \
+  --save-best
 ```
 
 ### 2. 評価
