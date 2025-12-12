@@ -17,8 +17,13 @@ from models import (  # noqa: E402
     DiscardModel,
 )
 
+DEFAULT_IN_CHANNELS = 380
+NUM_TILE_CLASSES = 34
 
-def create_large_coatnet(in_channels=380, num_classes=34, dropout=0.1):
+
+def create_large_coatnet(
+    in_channels=DEFAULT_IN_CHANNELS, num_classes=NUM_TILE_CLASSES, dropout=0.1
+):
     """CoAtNet with wider channels and deeper transformer blocks."""
     backbone = CoAtNet(
         in_channels=in_channels,
@@ -36,7 +41,9 @@ def create_large_coatnet(in_channels=380, num_classes=34, dropout=0.1):
     )
 
 
-def create_large_resnet(in_channels=380, num_classes=34, dropout=0.1):
+def create_large_resnet(
+    in_channels=DEFAULT_IN_CHANNELS, num_classes=NUM_TILE_CLASSES, dropout=0.1
+):
     """Deeper ResNet-style backbone with larger channel widths."""
     backbone = ResNet(
         in_channels=in_channels,
@@ -52,7 +59,9 @@ def create_large_resnet(in_channels=380, num_classes=34, dropout=0.1):
     )
 
 
-def create_large_vit(in_channels=380, num_classes=34, dropout=0.1):
+def create_large_vit(
+    in_channels=DEFAULT_IN_CHANNELS, num_classes=NUM_TILE_CLASSES, dropout=0.1
+):
     """Vision Transformer variant with a larger embedding and depth."""
     backbone = VisionTransformer(
         in_channels=in_channels,

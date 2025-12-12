@@ -166,6 +166,7 @@ def main():
         train_ratio=args.train_ratio,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
+        pin_memory=True,
         seed=args.seed,
     )
 
