@@ -147,7 +147,7 @@ class StateEncoderV2:
         reach_status = [0] * 4
         last_discard_info = None  # Track (player_id, tile_id) of most recent discard
 
-        for i in range(1, log_index_in_kyoku + 1):
+        for i in range(1, log_index_in_kyoku):
             move = self.kyoku_log[i]
             
             if 'zimo' in move or 'gangzimo' in move:
