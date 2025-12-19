@@ -15,6 +15,7 @@ import torch.nn.functional as F
 import numpy as np
 
 from models import create_coatnet_model, create_resnet_model, create_vit_model
+from advanced_training.large_models import MODEL_FACTORIES as LARGE_MODEL_FACTORIES
 
 
 # ==================== Tile Definitions ====================
@@ -624,29 +625,53 @@ def run_single_player_game(model, device, max_turns=18, seed=None, verbose=True,
 # ==================== Main Entry Point ====================
 
 
+# ==================== Model Factory Functions ====================
+
+
+# Combined model factories: regular models + large models from advanced_training
+MODEL_FACTORIES = {
+    'coatnet': create_coatnet_model,
+    'resnet': create_resnet_model,
+    'vit': create_vit_model,
+    **LARGE_MODEL_FACTORIES,  # coatnet_large, resnet_large, vit_large
+}
+
+
 def infer_model_type_from_path(model_path):
     """
     Infer model type from the model file path.
     
-    Looks for architecture names (coatnet, resnet, vit) in the filename,
-    treating common separators (_, -, .) as word boundaries to avoid false
-    positives (e.g., 'vitamin' won't match 'vit').
+    Looks for architecture names (coatnet, resnet, vit) and size variants (large)
+    in the filename, treating common separators (_, -, .) as word boundaries to
+    avoid false positives (e.g., 'vitamin' won't match 'vit').
     
     Note: If multiple model types appear in the filename (e.g., 'coatnet_vit_hybrid.pth'),
-    the order of precedence is: vit > resnet > coatnet.
+    the order of precedence is: large variants > vit > resnet > coatnet.
     
     Args:
         model_path: Path to the model file
         
     Returns:
-        Inferred model type ('coatnet', 'resnet', 'vit') or None if not found
+        Inferred model type ('coatnet', 'resnet', 'vit', 'coatnet_large', 
+        'resnet_large', 'vit_large') or None if not found
     """
     filename = os.path.basename(model_path).lower()
     
     # Split on common separators (underscore, hyphen, dot) to get words
     words = re.split(r'[_.-]', filename)
     
-    # Check for exact word matches (precedence: vit > resnet > coatnet)
+    # Check for "large" variants first (higher precedence)
+    has_large = 'large' in words
+    
+    if has_large:
+        if 'vit' in words:
+            return 'vit_large'
+        elif 'resnet' in words:
+            return 'resnet_large'
+        elif 'coatnet' in words:
+            return 'coatnet_large'
+    
+    # Check for regular model types (precedence: vit > resnet > coatnet)
     if 'vit' in words:
         return 'vit'
     elif 'resnet' in words:
@@ -666,7 +691,7 @@ def parse_args():
     parser.add_argument('--model-path', type=str, default='discard_model_coatnet.pth',
                        help='Path to trained model weights')
     parser.add_argument('--model-type', type=str, default=None,
-                       choices=['coatnet', 'resnet', 'vit'],
+                       choices=sorted(MODEL_FACTORIES.keys()),
                        help='Model architecture type (auto-detected from filename if not specified)')
     parser.add_argument('--device', type=str, default='auto',
                        help='Device to use (auto/cuda/cpu)')
@@ -713,14 +738,11 @@ def main():
     print(f"📂 Loading model from '{args.model_path}'...")
     
     try:
-        if model_type == 'coatnet':
-            model = create_coatnet_model(dropout=0.0)
-        elif model_type == 'resnet':
-            model = create_resnet_model(dropout=0.0)
-        elif model_type == 'vit':
-            model = create_vit_model(dropout=0.0)
-        else:
-            raise ValueError(f"Unknown model type: {model_type}")
+        if model_type not in MODEL_FACTORIES:
+            raise ValueError(f"Unknown model type: {model_type}. "
+                           f"Available: {list(MODEL_FACTORIES.keys())}")
+        
+        model = MODEL_FACTORIES[model_type](dropout=0.0)
         
         state_dict = torch.load(args.model_path, map_location=device, weights_only=True)
         
@@ -749,16 +771,12 @@ def main():
         
         # Offer to run in demo mode
         print("\n🎮 Running in DEMO mode with untrained model...")
-        if model_type == 'coatnet':
-            model = create_coatnet_model(dropout=0.0)
-        elif model_type == 'resnet':
-            model = create_resnet_model(dropout=0.0)
-        elif model_type == 'vit':
-            model = create_vit_model(dropout=0.0)
+        if model_type in MODEL_FACTORIES:
+            model = MODEL_FACTORIES[model_type](dropout=0.0)
         else:
-            # Should not reach here, but fallback to coatnet as default
+            # Fallback to coatnet as default
             print(f"⚠️  Unexpected model type '{model_type}', falling back to 'coatnet'")
-            model = create_coatnet_model(dropout=0.0)
+            model = MODEL_FACTORIES['coatnet'](dropout=0.0)
         model.to(device)
         model.eval()
     except Exception as e:
