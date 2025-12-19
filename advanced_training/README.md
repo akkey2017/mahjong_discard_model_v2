@@ -48,6 +48,7 @@ python advanced_training/evaluate_large.py \
 - `--data`: 評価に使うZIPを複数指定可能（空白区切り）
 - `--max-files-per-zip`: 各ZIPから読む最大ファイル数（デフォルト: 200）
 - `--batch-size`: バッチサイズ（デフォルト: 64）
+- `--train-ratio`: 学習用データの割合（残りが検証用、デフォルト: 0.9）
 - `--show-demo`: 推論デモを表示
 - `--num-demo-samples`: デモに表示するサンプル数（デフォルト: 5）
 

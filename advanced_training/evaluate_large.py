@@ -143,6 +143,12 @@ def parse_args():
         default=42,
         help="Random seed for reproducible splits",
     )
+    parser.add_argument(
+        "--train-ratio",
+        type=float,
+        default=0.9,
+        help="Ratio of data used for training (validation uses the rest)",
+    )
 
     return parser.parse_args()
 
@@ -224,6 +230,7 @@ def main():
     print(f"{'show_demo':20s}: {args.show_demo}")
     print(f"{'num_demo_samples':20s}: {args.num_demo_samples}")
     print(f"{'seed':20s}: {args.seed}")
+    print(f"{'train_ratio':20s}: {args.train_ratio}")
     print("=" * 60 + "\n")
 
     # Create model
@@ -288,7 +295,7 @@ def main():
     # Create data loaders
     _, val_loader = create_dataloaders(
         discard_dataset,
-        train_ratio=0.9,
+        train_ratio=args.train_ratio,
         batch_size=args.batch_size,
         num_workers=args.num_workers,
         seed=args.seed,
@@ -332,7 +339,7 @@ def main():
     if args.show_demo:
         # Get validation set for demo
         generator = torch.Generator().manual_seed(args.seed)
-        train_size = int(len(discard_dataset) * 0.9)
+        train_size = int(len(discard_dataset) * args.train_ratio)
         val_size = len(discard_dataset) - train_size
         _, val_set = random_split(
             discard_dataset, [train_size, val_size], generator=generator
