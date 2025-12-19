@@ -645,8 +645,14 @@ def infer_model_type_from_path(model_path):
     in the filename, treating common separators (_, -, .) as word boundaries to
     avoid false positives (e.g., 'vitamin' won't match 'vit').
     
-    Note: If multiple model types appear in the filename (e.g., 'coatnet_vit_hybrid.pth'),
-    the order of precedence is: large variants > vit > resnet > coatnet.
+    Precedence rules:
+    - If 'large' is present in filename, returns a large variant
+    - Within each size category, architecture precedence is: vit > resnet > coatnet
+    
+    Examples:
+    - 'model_vit_large.pth' -> 'vit_large'
+    - 'model_coatnet.pth' -> 'coatnet'
+    - 'model_resnet_large.pth' -> 'resnet_large'
     
     Args:
         model_path: Path to the model file
@@ -660,26 +666,22 @@ def infer_model_type_from_path(model_path):
     # Split on common separators (underscore, hyphen, dot) to get words
     words = re.split(r'[_.-]', filename)
     
-    # Check for "large" variants first (higher precedence)
-    has_large = 'large' in words
-    
-    if has_large:
-        if 'vit' in words:
-            return 'vit_large'
-        elif 'resnet' in words:
-            return 'resnet_large'
-        elif 'coatnet' in words:
-            return 'coatnet_large'
-    
-    # Check for regular model types (precedence: vit > resnet > coatnet)
+    # Detect architecture (precedence: vit > resnet > coatnet)
+    arch = None
     if 'vit' in words:
-        return 'vit'
+        arch = 'vit'
     elif 'resnet' in words:
-        return 'resnet'
+        arch = 'resnet'
     elif 'coatnet' in words:
-        return 'coatnet'
+        arch = 'coatnet'
     
-    return None
+    if arch is None:
+        return None
+    
+    # Return large variant if 'large' is present, otherwise regular
+    if 'large' in words:
+        return f'{arch}_large'
+    return arch
 
 
 def parse_args():
