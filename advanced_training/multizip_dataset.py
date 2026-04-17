@@ -22,7 +22,8 @@ class MultiZipMahjongDataset(MahjongDataset):
     how many samples were loaded from each source for reporting.
     """
 
-    def __init__(self, zip_paths, max_files_per_zip=10000, verbose=True):
+    def __init__(self, zip_paths, max_files_per_zip=10000, verbose=True,
+                 collect_all_actions=False, include_fulou_negatives=False):
         if isinstance(zip_paths, (str, Path)):
             zip_paths = [zip_paths]
 
@@ -31,6 +32,7 @@ class MultiZipMahjongDataset(MahjongDataset):
             raise ValueError("At least one ZIP path must be provided")
 
         combined_samples = []
+        combined_game_ids = []
         self.source_counts = {}
 
         for path in resolved_paths:
@@ -41,12 +43,19 @@ class MultiZipMahjongDataset(MahjongDataset):
                 zip_path=str(path),
                 max_files=max_files_per_zip,
                 verbose=verbose,
+                collect_all_actions=collect_all_actions,
+                include_fulou_negatives=include_fulou_negatives,
             )
             combined_samples.extend(dataset.samples)
+            # Prefix game ids with source archive so they're unique across zips
+            combined_game_ids.extend(
+                f"{path.name}::{gid}" for gid in dataset.game_ids
+            )
             self.source_counts[str(path)] = len(dataset)
 
         # Initialize parent with the aggregated samples
         super().__init__(samples=combined_samples, verbose=False)
+        self.game_ids = combined_game_ids
 
     def get_statistics(self):
         stats = super().get_statistics()

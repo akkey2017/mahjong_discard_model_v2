@@ -10,6 +10,22 @@ import torch.nn.functional as F
 from einops import rearrange
 
 
+class DropPath(nn.Module):
+    """Stochastic depth per sample (used in ViT / modern vision models)."""
+
+    def __init__(self, drop_prob: float = 0.0):
+        super().__init__()
+        self.drop_prob = drop_prob
+
+    def forward(self, x):
+        if self.drop_prob == 0.0 or not self.training:
+            return x
+        keep_prob = 1.0 - self.drop_prob
+        shape = (x.shape[0],) + (1,) * (x.ndim - 1)
+        mask = x.new_empty(shape).bernoulli_(keep_prob).div_(keep_prob)
+        return x * mask
+
+
 # ==================== CoAtNet Architecture ====================
 
 class MBConv(nn.Module):
@@ -47,36 +63,38 @@ class MBConv(nn.Module):
 
 
 class Attention(nn.Module):
-    """Multi-head self-attention mechanism."""
-    
+    """Multi-head self-attention mechanism using PyTorch scaled_dot_product_attention."""
+
     def __init__(self, dim, heads=8, dropout=0.0):
         super().__init__()
+        if dim % heads != 0:
+            raise ValueError(f"dim ({dim}) must be divisible by heads ({heads})")
         self.heads = heads
-        self.scale = (dim // heads) ** -0.5
-        
-        self.to_qkv = nn.Linear(dim, dim * 3)
+        self.head_dim = dim // heads
+        self.attn_dropout = dropout
+
+        self.to_qkv = nn.Linear(dim, dim * 3, bias=True)
         self.to_out = nn.Sequential(
             nn.Linear(dim, dim),
             nn.Dropout(dropout)
         )
-    
+
     def forward(self, x):
         qkv = self.to_qkv(x).chunk(3, dim=-1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h=self.heads), qkv)
-        
-        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
-        attn = dots.softmax(dim=-1)
-        
-        out = torch.matmul(attn, v)
+
+        out = F.scaled_dot_product_attention(
+            q, k, v,
+            dropout_p=self.attn_dropout if self.training else 0.0,
+        )
         out = rearrange(out, 'b h n d -> b n (h d)')
-        
         return self.to_out(out)
 
 
 class TransformerBlock(nn.Module):
     """Transformer encoder block with self-attention and feed-forward network."""
-    
-    def __init__(self, dim, heads, dropout=0.0):
+
+    def __init__(self, dim, heads, dropout=0.0, drop_path=0.0):
         super().__init__()
         self.norm1 = nn.LayerNorm(dim)
         self.attn = Attention(dim, heads, dropout)
@@ -88,10 +106,11 @@ class TransformerBlock(nn.Module):
             nn.Linear(dim * 4, dim),
             nn.Dropout(dropout)
         )
-    
+        self.drop_path = DropPath(drop_path) if drop_path > 0.0 else nn.Identity()
+
     def forward(self, x):
-        x = x + self.attn(self.norm1(x))
-        x = x + self.ffn(self.norm2(x))
+        x = x + self.drop_path(self.attn(self.norm1(x)))
+        x = x + self.drop_path(self.ffn(self.norm2(x)))
         return x
 
 
@@ -157,22 +176,24 @@ class CoAtNet(nn.Module):
 class DiscardModel(nn.Module):
     """
     Mahjong discard prediction model.
-    
+
     Takes a game state tensor and predicts which tile to discard.
     """
-    
+
     def __init__(self, backbone, final_channels, num_classes=34, dropout=0.0):
         super().__init__()
         self.backbone = backbone
         self.pool = nn.AdaptiveAvgPool2d(1)
         self.flat = nn.Flatten()
+        self.norm = nn.LayerNorm(final_channels)
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(final_channels, num_classes)
-    
+
     def forward(self, x):
         x = self.backbone(x)
         x = self.pool(x)
         x = self.flat(x)
+        x = self.norm(x)
         x = self.dropout(x)
         return self.fc(x)
 
@@ -277,47 +298,107 @@ class PatchEmbedding(nn.Module):
 class VisionTransformer(nn.Module):
     """
     Vision Transformer for mahjong state processing.
-    
+
     Processes the entire state as a sequence of patches using transformer blocks.
+    A learnable [CLS] token is prepended and used as the pooled representation.
     """
-    
-    def __init__(self, in_channels, embed_dim, depth, heads, patch_size=(1, 1), dropout=0.0):
+
+    def __init__(
+        self,
+        in_channels,
+        embed_dim,
+        depth,
+        heads,
+        patch_size=(1, 1),
+        dropout=0.0,
+        drop_path=0.1,
+        use_cls_token=True,
+    ):
         super().__init__()
-        
+
         # Validate patch_size
         if not isinstance(patch_size, tuple) or len(patch_size) != 2:
             raise ValueError("patch_size must be a tuple of length 2")
         if patch_size[0] <= 0 or patch_size[1] <= 0:
             raise ValueError("patch_size components must be positive integers")
-        
+        if 4 % patch_size[0] != 0 or 9 % patch_size[1] != 0:
+            raise ValueError(
+                f"patch_size {patch_size} must divide board shape (4, 9) evenly"
+            )
+
         self.patch_embed = PatchEmbedding(in_channels, embed_dim, patch_size)
-        
-        # Positional embedding for 4x9 board after patching
+        self.use_cls_token = use_cls_token
+
         num_patches = (4 // patch_size[0]) * (9 // patch_size[1])
-        self.pos_embed = nn.Parameter(torch.randn(1, num_patches, embed_dim))
+        num_tokens = num_patches + (1 if use_cls_token else 0)
+
+        if use_cls_token:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+            nn.init.trunc_normal_(self.cls_token, std=0.02)
+        else:
+            self.cls_token = None
+
+        self.pos_embed = nn.Parameter(torch.zeros(1, num_tokens, embed_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)
         self.dropout = nn.Dropout(dropout)
-        
-        self.transformer_blocks = nn.Sequential(
-            *[TransformerBlock(embed_dim, heads, dropout) for _ in range(depth)]
-        )
-        
+
+        # Linearly-scaled stochastic depth across blocks
+        dpr = [drop_path * i / max(depth - 1, 1) for i in range(depth)]
+        self.transformer_blocks = nn.ModuleList([
+            TransformerBlock(embed_dim, heads, dropout=dropout, drop_path=dpr[i])
+            for i in range(depth)
+        ])
+
         self.norm = nn.LayerNorm(embed_dim)
         self.final_channels = embed_dim
-    
+
+        self.apply(self._init_weights)
+
+    @staticmethod
+    def _init_weights(m):
+        if isinstance(m, nn.Linear):
+            nn.init.trunc_normal_(m.weight, std=0.02)
+            if m.bias is not None:
+                nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.LayerNorm):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+
+    def forward_features(self, x):
+        """Return (B, embed_dim) pooled token for classification heads."""
+        x = self.patch_embed(x)  # (B, num_patches, embed_dim)
+        if self.use_cls_token:
+            cls = self.cls_token.expand(x.shape[0], -1, -1)
+            x = torch.cat([cls, x], dim=1)
+        x = x + self.pos_embed
+        x = self.dropout(x)
+        for blk in self.transformer_blocks:
+            x = blk(x)
+        x = self.norm(x)
+        if self.use_cls_token:
+            return x[:, 0]
+        return x.mean(dim=1)
+
     def forward(self, x):
         # x: (B, C, H, W)
         x = self.patch_embed(x)  # (B, num_patches, embed_dim)
+        if self.use_cls_token:
+            cls = self.cls_token.expand(x.shape[0], -1, -1)
+            x = torch.cat([cls, x], dim=1)
         x = x + self.pos_embed
         x = self.dropout(x)
-        x = self.transformer_blocks(x)
+        for blk in self.transformer_blocks:
+            x = blk(x)
         x = self.norm(x)
-        
-        # Reshape back to spatial format for compatibility
-        b, n, c = x.shape
+
+        if self.use_cls_token:
+            # Drop CLS token when returning spatial map
+            x = x[:, 1:]
+
+        # Reshape back to spatial format for compatibility with DiscardModel pool
         h = 4 // self.patch_embed.patch_size[0]
         w = 9 // self.patch_embed.patch_size[1]
         x = rearrange(x, 'b (h w) c -> b c h w', h=h, w=w)
-        
         return x
 
 
@@ -352,7 +433,7 @@ def create_resnet_model(in_channels=380, num_classes=34, dropout=0.0):
 def create_vit_model(in_channels=380, num_classes=34, dropout=0.0):
     """
     Create a Vision Transformer-based discard model.
-    
+
     Note: Using patch_size=(1,1) creates 36 patches from the 4x9 input.
     For different patch granularity, consider:
     - patch_size=(1,3) for 12 patches (grouping by tile suits)
@@ -365,7 +446,63 @@ def create_vit_model(in_channels=380, num_classes=34, dropout=0.0):
         "depth": 6,
         "heads": 8,
         "patch_size": (1, 1),  # Each position becomes a patch
-        "dropout": dropout
+        "dropout": dropout,
+        "drop_path": 0.1,
     }
     backbone = VisionTransformer(**vit_params)
     return DiscardModel(backbone, final_channels=256, num_classes=num_classes, dropout=dropout)
+
+
+# ==================== Multi-Task Model ====================
+
+# Action heads and their output sizes. Used by MultiTaskDiscardModel and by
+# the training pipeline to route labels to the appropriate head.
+MULTITASK_HEAD_SPECS = {
+    "discard": 34,       # Which tile to discard (34 standard tiles)
+    "riichi": 2,         # Declare riichi or not
+    "chi": 2,            # Call chi or not
+    "pon": 2,            # Call pon or not
+    "kan": 2,            # Call ankan/kakan/daiminkan or not (binary)
+    "agari": 2,          # Declare tsumo/ron agari or not
+}
+
+
+class MultiTaskDiscardModel(nn.Module):
+    """
+    Multi-task head model sharing a single backbone.
+
+    The backbone produces a (B, C, H, W) feature map. The shared trunk
+    pools and normalizes that to a D-dim embedding. Each action head is
+    a small MLP that outputs logits for its task.
+
+    Forward returns a dict mapping head-name -> logits. The training loop
+    selects the appropriate head(s) per sample using ``action_type``.
+    """
+
+    def __init__(self, backbone, final_channels, heads=None, dropout=0.0):
+        super().__init__()
+        self.backbone = backbone
+        self.pool = nn.AdaptiveAvgPool2d(1)
+        self.flat = nn.Flatten()
+        self.norm = nn.LayerNorm(final_channels)
+        self.dropout = nn.Dropout(dropout)
+
+        heads = heads or MULTITASK_HEAD_SPECS
+        self.heads = nn.ModuleDict({
+            name: nn.Linear(final_channels, out_dim) for name, out_dim in heads.items()
+        })
+        self.head_specs = dict(heads)
+
+    def trunk(self, x):
+        x = self.backbone(x)
+        x = self.pool(x)
+        x = self.flat(x)
+        x = self.norm(x)
+        x = self.dropout(x)
+        return x
+
+    def forward(self, x, head_names=None):
+        feat = self.trunk(x)
+        if head_names is None:
+            return {name: head(feat) for name, head in self.heads.items()}
+        return {name: self.heads[name](feat) for name in head_names}
