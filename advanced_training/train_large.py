@@ -208,6 +208,7 @@ def main():
             num_workers=args.num_workers,
             pin_memory=True,
             seed=args.seed,
+            split_by_game=args.split_by_game,
         )
 
     # ---- Model / optimizer / scheduler ----
@@ -375,14 +376,18 @@ def main():
 
         # Save best (weights + metrics only; don't leak optimizer state into
         # best_model.pth since "best" is an evaluation artifact, not a resume
-        # target).
+        # target). When EMA is active, "best" reflects the EMA-smoothed
+        # weights that were actually evaluated.
         checkpoint(
             ema.ema if ema else model,
             val_metrics,
             extra={"epoch": epoch + 1, "metrics": val_metrics},
         )
-        # Always save last — include full training state so --resume can
-        # actually continue the run from the same optimization trajectory.
+        # Always save last — include the full *training* state so --resume
+        # can continue from the same optimization trajectory. Critically,
+        # the main model_state must be the training weights (not the EMA
+        # shadow), otherwise restored optimizer/scheduler/scaler state would
+        # no longer correspond to the model parameters they were tracking.
         last_extra = {
             "epoch": epoch + 1,
             "metrics": val_metrics,
@@ -393,10 +398,12 @@ def main():
         if scaler is not None:
             last_extra["scaler_state"] = scaler.state_dict()
         if ema is not None:
+            # EMA shadow weights are stored separately so the main payload
+            # stays the training model.
             last_extra["ema_state"] = ema.ema.state_dict()
         save_checkpoint(
             str(exp.last_checkpoint),
-            ema.ema if ema else model,
+            model,
             model_type=args.model,
             config=vars(args),
             extra=last_extra,

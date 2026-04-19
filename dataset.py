@@ -94,10 +94,34 @@ def classify_gang(meld_str: str) -> str:
 # ----- kyoku-level sample extraction --------------------------------------
 
 
+def _fulou_source_seat(p_id: int, meld_str: str) -> int:
+    """Resolve the seat (0..3) the called tile came from.
+
+    Direction markers follow kobalab's convention:
+        ``-``: kamicha (upper seat, ``(p_id + 3) % 4``)
+        ``=``: toimen  (across,      ``(p_id + 2) % 4``)
+        ``+``: shimocha (lower seat, ``(p_id + 1) % 4``)
+    """
+    if "-" in meld_str:
+        return (p_id + 3) % 4
+    if "=" in meld_str:
+        return (p_id + 2) % 4
+    return (p_id + 1) % 4  # '+' (or fallback)
+
+
 def _reconstruct_hands_up_to(kyoku_log, stop_index):
-    """Return the 37-dim hand counters for all 4 players just before kyoku_log[stop_index]."""
+    """Return the 37-dim hand counters for all 4 players just before kyoku_log[stop_index].
+
+    Tracks each player's river so that, on a ``fulou`` event, the actual
+    called tile (the most recent discard from the source seat) can be popped
+    out of the meld before subtracting the remaining tiles from the caller's
+    hand. Mirrors :class:`mahjong_ai_features.StateEncoderV2` so call/gang
+    feasibility checks downstream (``can_chi``/``can_pon``/``can_daiminkan``/
+    ``can_ankan``) operate on hands consistent with the encoder.
+    """
     qipai = kyoku_log[0]["qipai"]
     hands = [_make_pai_counter_list_from(h) for h in qipai["shoupai"]]
+    rivers = [[], [], [], []]
     for j in range(1, stop_index):
         m = kyoku_log[j]
         if "zimo" in m:
@@ -116,26 +140,40 @@ def _reconstruct_hands_up_to(kyoku_log, stop_index):
             t = FEATURE_TILE_MAP.get(tstr)
             if t is not None:
                 hands[p][t] -= 1
+                rivers[p].append(t)
         elif "fulou" in m:
             p = m["fulou"]["l"]
-            tiles = _fulou_to_pais(m["fulou"]["m"])
-            # One tile came from another player's river; remove the rest from hand.
-            # Without inspecting direction precisely here we just remove the
-            # non-duplicate tiles; for negative-sample generation a small error
-            # is acceptable.
+            meld = m["fulou"]["m"]
+            tiles = _fulou_to_pais(meld)
             if tiles:
+                from_p_id = _fulou_source_seat(p, meld)
+                # The called tile is the source seat's most recent discard.
+                # Popping from the river (rather than parsing the marker
+                # position) is robust to chi/pon/daiminkan format variants
+                # and matches StateEncoderV2's bookkeeping.
                 consumed = list(tiles)
-                consumed.pop(0)
+                if rivers[from_p_id]:
+                    taken_tile = rivers[from_p_id].pop()
+                    if taken_tile in consumed:
+                        consumed.remove(taken_tile)
                 for t in consumed:
                     hands[p][t] = max(0, hands[p][t] - 1)
         elif "gang" in m:
             p = m["gang"]["l"]
-            tiles = _fulou_to_pais(m["gang"]["m"])
-            if any(c in m["gang"]["m"] for c in "+-="):
-                # kakan: one extra tile added to an existing pon
+            meld = m["gang"]["m"]
+            tiles = _fulou_to_pais(meld)
+            if any(c in meld for c in "+-="):
+                # kakan: only the newly added tile leaves the hand; the
+                # other three were already part of the existing pon meld.
+                # The kakan tile is the one *not* shared by the original pon
+                # -- typically the trailing digit (e.g. ``p555=0`` -> p0),
+                # but the unique-tile rule also handles non-red kakan where
+                # all four tiles look identical.
                 if tiles:
-                    hands[p][tiles[0]] = max(0, hands[p][tiles[0]] - 1)
+                    kakan_tile = tiles[-1]
+                    hands[p][kakan_tile] = max(0, hands[p][kakan_tile] - 1)
             else:
+                # ankan: all four tiles came from the hand.
                 for t in tiles:
                     hands[p][t] = max(0, hands[p][t] - 1)
     return hands

@@ -2,9 +2,21 @@
 Inference wrapper that turns a trained checkpoint into a playable agent.
 
 The agent accepts a running kyoku log (same shape used at training time) and
-returns a decision dict with an ``"action"`` key whose value is a 牌譜形式
-action name (``"dapai"``, ``"riichi"``, ``"gang"``, ``"hule"``, or ``"pass"``).
-Additional keys (``"tile"``, ``"confidence"``) are included where relevant.
+returns a decision dict whose ``"action"`` value is a 牌譜形式 action name
+matching the training head namespace:
+
+    ``"dapai"``  - discard a tile (``"tile"``/``"tile_id"`` included).
+    ``"riichi"`` - declare riichi together with a discard.
+    ``"fulou"``  - call on an opponent's discard. The specific call type is
+                   reported via the additional ``"call_type"`` field, whose
+                   value is ``"chi"``, ``"pon"``, or ``"daiminkan"``.
+    ``"gang"``   - declare ankan (or kakan, when supported).
+    ``"hule"``   - declare a win (not currently emitted by these methods).
+    ``"pass"``   - take no action.
+
+Other keys (``"tile"``, ``"tile_id"``, ``"confidence"``) are included where
+relevant. Returned dicts are *agent decisions*, not raw 牌譜形式 log records
+such as ``{"dapai": ...}``.
 
 Usage::
 
@@ -176,10 +188,17 @@ class MahjongAgent:
 
         best_idx = int(masked.argmax().item())
         best_prob = float(probs[best_idx])
-        _IDX_TO_ACTION = {1: "chi", 2: "pon", 3: "daiminkan"}
+        # Map fulou-head class index -> 牌譜形式 sub-type.
+        _IDX_TO_CALL_TYPE = {1: "chi", 2: "pon", 3: "daiminkan"}
         if best_idx == 0 or best_prob < 0.5:
             return {"action": "pass"}
-        return {"action": _IDX_TO_ACTION[best_idx], "confidence": best_prob}
+        # Report all fulou variants under the unified ``"fulou"`` action so
+        # the returned namespace stays aligned with the training head names.
+        return {
+            "action": "fulou",
+            "call_type": _IDX_TO_CALL_TYPE[best_idx],
+            "confidence": best_prob,
+        }
 
     def decide_ankan(self, kyoku_log, log_index, player_id,
                      my_hand_str: str) -> bool:
