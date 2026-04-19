@@ -246,6 +246,23 @@ def main():
         start_epoch = int(payload.get("extra", {}).get("epoch", 0))
         exp.log(f"Resumed from {exp.last_checkpoint} (epoch {start_epoch})")
 
+        # Restore ModelCheckpoint.best_score so the first post-resume epoch
+        # doesn't unconditionally overwrite best_model.pth.
+        if exp.best_checkpoint.exists():
+            best_payload = load_checkpoint(exp.best_checkpoint, map_location=device)
+            best_metrics = best_payload.get("extra", {}).get("metrics", {})
+            if monitor_metric in best_metrics:
+                checkpoint.best_score = best_metrics[monitor_metric]
+                exp.log(
+                    f"Restored best {monitor_metric}={checkpoint.best_score:.4f} "
+                    f"from {exp.best_checkpoint}"
+                )
+            else:
+                exp.log(
+                    f"Best checkpoint {exp.best_checkpoint} does not contain "
+                    f"metric '{monitor_metric}'; best_score not restored."
+                )
+
     # ---- Metrics objects (single-task) ----
     top1_acc = TopKAccuracy(k=1)
     top3_acc = TopKAccuracy(k=3)

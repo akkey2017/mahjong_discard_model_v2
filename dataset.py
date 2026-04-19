@@ -10,10 +10,14 @@ where ``action_type`` and ``label`` follow 牌譜形式 (game record format) key
     "gang"    -> label: 0=pass/no-gang, 1=ankan, 2=kakan
     "hule"    -> label: 1=win (tsumo or ron; no negatives synthesized)
 
-Negative samples for fulou (label=0) can be synthesized via ``include_fulou_negatives``.
+Negative samples for fulou (label=0) can be synthesized via
+``include_fulou_negatives``. Gang negatives (label=0) are emitted automatically
+for every dapai where ankan was possible but not taken.
 
-Backwards-compatible: the historical dataset contained only ``"dapai"`` samples;
-pass ``collect_all_actions=False`` to keep that behaviour.
+Breaking change: older dataset code exposed discard-only samples with the
+action type ``"discard"``. This module now uses 牌譜形式 names such as
+``"dapai"`` (including when ``collect_all_actions=False``). Callers that
+previously filtered for ``"discard"`` must update to ``"dapai"``.
 """
 
 import hashlib
@@ -32,7 +36,7 @@ from mahjong_ai_features import (
     _make_pai_counter_list_from,
     _fulou_to_pais,
 )
-from mahjong_rules import can_chi, can_pon, can_daiminkan
+from mahjong_rules import can_ankan, can_chi, can_pon, can_daiminkan
 
 
 # ----- helpers for fulou/gang classification ------------------------------
@@ -47,9 +51,9 @@ def classify_fulou(meld_str: str) -> str:
     """Classify a 'fulou' meld record into 'chi'/'pon'/'daiminkan'.
 
     The ``m`` field in fulou records is e.g.:
-        's1-23'   : chi (3 tiles, one direction mark)
-        'p5=5'    : pon (3 identical tiles)
-        'z333+'   : daiminkan (4 identical tiles)
+        's1-23'    : chi (3 tiles forming a run; one direction mark)
+        'p5=55'    : pon (3 identical tiles; one direction mark)
+        'z3333+'   : daiminkan (4 identical tiles; one direction mark)
 
     The distinction is made by tile count (3 vs 4) and whether the tiles are
     identical (pon) or form a run (chi).
@@ -183,14 +187,25 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
 
     Args:
         kyoku_log: list of move dicts (starts with {'qipai': ...}).
-        collect_all_actions: if False, only emit 'discard' samples (legacy).
-        include_fulou_negatives: if True, synthesize chi/pon/kan pass samples.
+        collect_all_actions: if False, only emit 'dapai' samples.
+        include_fulou_negatives: if True, synthesize fulou-pass samples (label 0)
+            for other players who could have called but didn't.
+
+    Always (when ``collect_all_actions=True``) also emits:
+      - riichi 0/1 labels for every dapai
+      - gang=0 negatives for every dapai where the discarder held an ankan-able
+        quadruplet but chose to discard instead
     """
     if not kyoku_log or "qipai" not in kyoku_log[0]:
         return
 
     _FULOU_LABEL = {"chi": 1, "pon": 2, "daiminkan": 3}
     _GANG_LABEL = {"ankan": 1, "kakan": 2}
+
+    # Incrementally reconstructed hands; used for gang-negative detection.
+    hands_cache = None
+    if collect_all_actions:
+        hands_cache = {}
 
     for i, move in enumerate(kyoku_log):
         if "dapai" in move:
@@ -208,6 +223,12 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
 
             # Emit riichi decision for every dapai: 1 if declared, 0 otherwise.
             yield (kyoku_log, i, p_id, "riichi", 1 if "*" in raw else 0)
+
+            # Gang negative: discarder had an ankan-ready quad but chose dapai.
+            if i not in hands_cache:
+                hands_cache[i] = _reconstruct_hands_up_to(kyoku_log, i)
+            if can_ankan(hands_cache[i][p_id]):
+                yield (kyoku_log, i, p_id, "gang", 0)
 
             if include_fulou_negatives:
                 yield from _generate_fulou_negatives(kyoku_log, i)

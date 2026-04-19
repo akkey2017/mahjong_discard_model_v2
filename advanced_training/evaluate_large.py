@@ -119,12 +119,12 @@ def _run_demo(model, val_set, device, num_samples):
     for i in range(min(num_samples, len(val_set))):
         sample_idx = torch.randint(0, len(val_set), (1,)).item()
         xb_sample, yb_sample, action = val_set[sample_idx]
-        if action != "discard":
+        if action != "dapai":
             continue
         with torch.no_grad():
             out = model(xb_sample.unsqueeze(0).to(device))
             if isinstance(out, dict):
-                out = out["discard"]
+                out = out["dapai"]
             probs = F.softmax(out, dim=1)
             top5_probs, top5_idx = torch.topk(probs, 5)
         actual = ID_TO_TILE_34.get(yb_sample.item() if torch.is_tensor(yb_sample) else yb_sample, "?")
@@ -149,8 +149,8 @@ def _compute_per_tile_stats(model, val_loader, device, num_classes=34, is_multit
             xb, yb, actions = batch
             if isinstance(actions, torch.Tensor):
                 actions = [str(a) for a in actions.tolist()]
-            # restrict to discard samples
-            idx = [i for i, a in enumerate(actions) if a == "discard"]
+            # restrict to dapai (discard) samples
+            idx = [i for i, a in enumerate(actions) if a == "dapai"]
             if not idx:
                 continue
             xb = xb[idx].to(device)
@@ -162,7 +162,7 @@ def _compute_per_tile_stats(model, val_loader, device, num_classes=34, is_multit
 
         logits = model(xb)
         if isinstance(logits, dict):
-            logits = logits["discard"]
+            logits = logits["dapai"]
         preds = logits.argmax(dim=-1)
         for gt, pr in zip(yb.tolist(), preds.tolist()):
             if 0 <= gt < num_classes and 0 <= pr < num_classes:
@@ -274,9 +274,9 @@ def main():
             split_by_game=args.split_by_game,
         )
     else:
-        discard_dataset = full_dataset.filter_by_action("discard")
+        discard_dataset = full_dataset.filter_by_action("dapai")
         if len(discard_dataset) == 0:
-            raise RuntimeError("No discard samples found in evaluation data.")
+            raise RuntimeError("No dapai samples found in evaluation data.")
         _, val_loader = create_dataloaders(
             discard_dataset,
             train_ratio=args.train_ratio,
@@ -293,8 +293,10 @@ def main():
     top5 = TopKAccuracy(k=5)
 
     if is_multitask:
-        loss_fns = {k: nn.CrossEntropyLoss() for k in ["discard", "riichi", "chi",
-                                                       "pon", "kan", "agari"]}
+        loss_fns = {
+            k: nn.CrossEntropyLoss()
+            for k in ["dapai", "riichi", "fulou", "gang", "hule"]
+        }
         loss_fns["_default"] = nn.CrossEntropyLoss()
         results = evaluate_multitask(model, val_loader, loss_fns, device)
         print("\n" + "=" * 60)
@@ -332,7 +334,7 @@ def main():
     if args.show_demo:
         # Need a plain val Subset for demo; reuse val_loader's dataset
         generator = torch.Generator().manual_seed(args.seed)
-        base = full_dataset.filter_by_action("discard") if not is_multitask else full_dataset
+        base = full_dataset.filter_by_action("dapai") if not is_multitask else full_dataset
         train_size = int(len(base) * args.train_ratio)
         val_size = len(base) - train_size
         _, val_set = random_split(base, [train_size, val_size], generator=generator)

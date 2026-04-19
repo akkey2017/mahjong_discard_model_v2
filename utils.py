@@ -76,7 +76,7 @@ class EarlyStopping:
 class ModelCheckpoint:
     """Save model checkpoints during training.
 
-    The checkpoint is a dict of the form::
+    When ``model_type`` is provided, the checkpoint is a rich dict of the form::
 
         {
             "model_state": ...,
@@ -85,8 +85,12 @@ class ModelCheckpoint:
             "extra": {...},               # optional run-time info
         }
 
-    This lets :func:`load_checkpoint` restore the correct architecture
-    without relying on filename heuristics.
+    This lets :func:`load_checkpoint` restore the correct architecture without
+    relying on filename heuristics.
+
+    When ``model_type`` is ``None`` (legacy callers that expect a plain
+    ``state_dict`` via ``torch.load`` + ``load_state_dict``), the checkpoint
+    is written as a plain ``state_dict`` for backwards compatibility.
     """
 
     def __init__(self, filepath, monitor='val_loss', mode='min',
@@ -128,7 +132,16 @@ class ModelCheckpoint:
 
 
 def save_checkpoint(filepath, model, model_type=None, config=None, extra=None):
-    """Save a model as a rich checkpoint dict (architecture info included)."""
+    """Save a model checkpoint.
+
+    If ``model_type`` is provided, a rich dict (including architecture info) is
+    saved. If ``model_type`` is ``None``, a plain ``state_dict`` is written to
+    preserve backwards compatibility with callers that do
+    ``torch.load(path)`` + ``model.load_state_dict(...)`` directly.
+    """
+    if model_type is None:
+        torch.save(model.state_dict(), filepath)
+        return
     payload = {
         "model_state": model.state_dict(),
         "model_type": model_type,
@@ -209,7 +222,16 @@ def get_scheduler(optimizer, scheduler_name='cosine', **kwargs):
             cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
             return eta_min_ratio + (1.0 - eta_min_ratio) * cosine
 
-        return LambdaLR(optimizer, lr_lambda=lr_lambda)
+        scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
+        # Training loops call scheduler.step() AFTER each epoch, so ensure
+        # epoch 0 actually trains at the warmup-start LR (= base_lr/warmup_epochs)
+        # rather than the optimizer's base LR. This is defensive against
+        # PyTorch versions where LambdaLR's initial step may not apply.
+        initial_multiplier = lr_lambda(0)
+        for base_lr, group in zip(scheduler.base_lrs, optimizer.param_groups):
+            group['lr'] = base_lr * initial_multiplier
+        scheduler._last_lr = [g['lr'] for g in optimizer.param_groups]
+        return scheduler
     elif name == 'plateau':
         mode = kwargs.get('mode', 'max')
         factor = kwargs.get('factor', 0.5)
