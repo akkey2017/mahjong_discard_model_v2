@@ -196,10 +196,18 @@ def get_scheduler(optimizer, scheduler_name='cosine', **kwargs):
         optimizer: PyTorch optimizer
         scheduler_name: Name of the scheduler
             ('cosine', 'warmup_cosine', 'plateau', 'none')
-        **kwargs: Additional arguments for the scheduler. For 'warmup_cosine':
-            - T_max (int): total number of epochs
-            - warmup_epochs (int): number of warmup epochs (default 5)
-            - eta_min (float): final learning rate (default 1e-6)
+        **kwargs: Additional arguments for the scheduler.
+            For 'cosine':
+                - T_max (int): total number of epochs
+                - eta_min (float): absolute final learning rate (default 1e-6)
+            For 'warmup_cosine':
+                - T_max (int): total number of epochs
+                - warmup_epochs (int): number of warmup epochs (default
+                  ``min(5, max(1, T_max // 5))``)
+                - eta_min_ratio (float): floor of the LR multiplier at the end
+                  of the cosine decay, expressed as a fraction of the base LR
+                  (default 0.01 -> final LR = 1% of base LR). This is a
+                  *ratio*, not an absolute LR.
 
     Returns:
         PyTorch learning rate scheduler or None
@@ -560,15 +568,21 @@ def train_one_epoch_multitask(
 
 
 def evaluate_multitask(model, val_loader, loss_fns, device, task_weights=None, use_amp=False):
-    """Multi-task evaluation. Returns per-task loss and top-1 accuracy."""
+    """Multi-task evaluation. Returns per-task loss and top-1 accuracy.
+
+    Per-task losses are sample-weighted: each batch's per-task loss (a mean
+    over that task's subset of the batch) is multiplied by the number of
+    samples routed to that head before being aggregated, so tasks with
+    variable per-batch subset sizes are not skewed by batch boundaries.
+    """
     model.eval()
     task_weights = task_weights or {}
     amp_device_type = "cuda" if isinstance(device, str) and device.startswith("cuda") else "cpu"
 
     per_task_correct = {}
     per_task_total = {}
-    per_task_loss_sum = {}
-    per_task_batches = {}
+    per_task_loss_sum = {}        # sample-weighted running sum
+    per_task_loss_samples = {}    # number of samples contributing to the sum
 
     pbar = tqdm(val_loader, desc="Evaluating", leave=True, file=sys.stderr,
                 dynamic_ncols=True, mininterval=0.1, unit="batch")
@@ -593,15 +607,18 @@ def evaluate_multitask(model, val_loader, loss_fns, device, task_weights=None, u
                     idx = torch.tensor(per_task_idx[task], device=device, dtype=torch.long)
                     logits = logits_all[task].index_select(0, idx)
                     targets = yb.index_select(0, idx)
+                    n = int(targets.numel())
                     lfn = loss_fns.get(task, loss_fns.get("_default"))
-                    if lfn is not None:
+                    if lfn is not None and n > 0:
                         weight = float(task_weights.get(task, 1.0))
                         l = lfn(logits, targets).item() * weight
-                        per_task_loss_sum[task] = per_task_loss_sum.get(task, 0.0) + l
-                        per_task_batches[task] = per_task_batches.get(task, 0) + 1
+                        # l is a mean over this subset; multiply by n to
+                        # accumulate a sample-weighted sum.
+                        per_task_loss_sum[task] = per_task_loss_sum.get(task, 0.0) + l * n
+                        per_task_loss_samples[task] = per_task_loss_samples.get(task, 0) + n
                     pred = logits.argmax(dim=-1)
                     per_task_correct[task] = per_task_correct.get(task, 0) + int((pred == targets).sum())
-                    per_task_total[task] = per_task_total.get(task, 0) + int(targets.numel())
+                    per_task_total[task] = per_task_total.get(task, 0) + n
 
     results = {}
     total_samples = sum(per_task_total.values()) or 1
@@ -609,9 +626,11 @@ def evaluate_multitask(model, val_loader, loss_fns, device, task_weights=None, u
     results["top1_acc"] = overall_correct / total_samples
     for task, total in per_task_total.items():
         acc = per_task_correct[task] / total if total else 0.0
-        avg_loss = (per_task_loss_sum.get(task, 0.0) / per_task_batches[task]) if per_task_batches.get(task) else 0.0
+        samples_for_loss = per_task_loss_samples.get(task, 0)
+        avg_loss = (per_task_loss_sum.get(task, 0.0) / samples_for_loss) if samples_for_loss else 0.0
         results[f"{task}_acc"] = acc
         results[f"{task}_loss"] = avg_loss
         results[f"{task}_total"] = total
-    results["loss"] = sum(per_task_loss_sum.values()) / max(1, sum(per_task_batches.values()))
+    overall_loss_samples = sum(per_task_loss_samples.values())
+    results["loss"] = (sum(per_task_loss_sum.values()) / overall_loss_samples) if overall_loss_samples else 0.0
     return results

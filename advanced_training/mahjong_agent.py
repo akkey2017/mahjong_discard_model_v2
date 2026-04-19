@@ -163,9 +163,10 @@ class MahjongAgent:
 
         # fulou head: 0=pass, 1=chi, 2=pon, 3=daiminkan
         probs = F.softmax(heads["fulou"][0], dim=-1)
-        # Mask out impossible calls.
+        # Mask out impossible *calls* (chi/pon/daiminkan). "pass" is always a
+        # legal option and should compete on its learned probability, so keep
+        # its value untouched here.
         masked = probs.clone()
-        masked[0] = 0.0  # "pass" is always structurally possible; keep it for comparison
         if not chi_ok:
             masked[1] = 0.0
         if not pon_ok:

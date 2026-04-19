@@ -248,7 +248,57 @@ def main():
         payload = load_checkpoint(exp.last_checkpoint, map_location=device)
         model.load_state_dict(payload["model_state"])
         start_epoch = int(payload.get("extra", {}).get("epoch", 0))
-        exp.log(f"Resumed from {exp.last_checkpoint} (epoch {start_epoch})")
+
+        # Restore the rest of the training state so the resumed run actually
+        # continues from the same optimization trajectory (LR schedule,
+        # optimizer moments, AMP scaler, EMA shadow weights).
+        extra = payload.get("extra", {})
+        restored_parts = ["model"]
+        missing_parts = []
+
+        optimizer_state = extra.get("optimizer_state")
+        if optimizer_state is not None:
+            optimizer.load_state_dict(optimizer_state)
+            restored_parts.append("optimizer")
+        else:
+            missing_parts.append("optimizer")
+
+        scheduler_state = extra.get("scheduler_state")
+        if scheduler is not None:
+            if scheduler_state is not None:
+                scheduler.load_state_dict(scheduler_state)
+                restored_parts.append("scheduler")
+            else:
+                missing_parts.append("scheduler")
+
+        scaler_state = extra.get("scaler_state")
+        if scaler is not None:
+            if scaler_state is not None:
+                scaler.load_state_dict(scaler_state)
+                restored_parts.append("scaler")
+            else:
+                missing_parts.append("scaler")
+
+        ema_state = extra.get("ema_state")
+        if ema is not None:
+            if ema_state is not None:
+                ema.ema.load_state_dict(ema_state)
+                restored_parts.append("ema")
+            else:
+                missing_parts.append("ema")
+
+        exp.log(
+            f"Resumed from {exp.last_checkpoint} (epoch {start_epoch}); "
+            f"restored state: {', '.join(restored_parts)}"
+        )
+        if missing_parts:
+            exp.log(
+                "WARNING: Resume checkpoint is missing training-state "
+                f"components ({', '.join(missing_parts)}). Those components "
+                "will restart from scratch, so LR schedule, optimizer "
+                "moments, AMP scaler, or EMA may not continue exactly from "
+                "the previous run."
+            )
 
         # Restore ModelCheckpoint.best_score so the first post-resume epoch
         # doesn't unconditionally overwrite best_model.pth.
@@ -323,19 +373,33 @@ def main():
                 scheduler.step()
             exp.log(f"Learning Rate: {optimizer.param_groups[0]['lr']:.6f}")
 
-        # Save best
+        # Save best (weights + metrics only; don't leak optimizer state into
+        # best_model.pth since "best" is an evaluation artifact, not a resume
+        # target).
         checkpoint(
             ema.ema if ema else model,
             val_metrics,
             extra={"epoch": epoch + 1, "metrics": val_metrics},
         )
-        # Always save last
+        # Always save last — include full training state so --resume can
+        # actually continue the run from the same optimization trajectory.
+        last_extra = {
+            "epoch": epoch + 1,
+            "metrics": val_metrics,
+            "optimizer_state": optimizer.state_dict(),
+        }
+        if scheduler is not None:
+            last_extra["scheduler_state"] = scheduler.state_dict()
+        if scaler is not None:
+            last_extra["scaler_state"] = scaler.state_dict()
+        if ema is not None:
+            last_extra["ema_state"] = ema.ema.state_dict()
         save_checkpoint(
             str(exp.last_checkpoint),
             ema.ema if ema else model,
             model_type=args.model,
             config=vars(args),
-            extra={"epoch": epoch + 1, "metrics": val_metrics},
+            extra=last_extra,
         )
 
         monitored = val_metrics.get(monitor_metric)
