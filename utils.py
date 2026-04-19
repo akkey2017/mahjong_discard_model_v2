@@ -225,12 +225,13 @@ def get_scheduler(optimizer, scheduler_name='cosine', **kwargs):
         scheduler = LambdaLR(optimizer, lr_lambda=lr_lambda)
         # Training loops call scheduler.step() AFTER each epoch, so ensure
         # epoch 0 actually trains at the warmup-start LR (= base_lr/warmup_epochs)
-        # rather than the optimizer's base LR. This is defensive against
-        # PyTorch versions where LambdaLR's initial step may not apply.
+        # rather than the optimizer's base LR. Keep the scheduler state aligned
+        # with that manual initialization so the first post-epoch step advances
+        # to lr_lambda(1) instead of repeating lr_lambda(0).
         initial_multiplier = lr_lambda(0)
         for base_lr, group in zip(scheduler.base_lrs, optimizer.param_groups):
             group['lr'] = base_lr * initial_multiplier
-        scheduler._last_lr = [g['lr'] for g in optimizer.param_groups]
+        scheduler.last_epoch = 0
         return scheduler
     elif name == 'plateau':
         mode = kwargs.get('mode', 'max')
@@ -274,11 +275,19 @@ def train_one_epoch(
     total_loss = 0.0
     num_batches = 0
     accumulation_steps = max(1, accumulation_steps)
-    accumulated = False  # tracks whether gradients are pending a flush
+    microbatches_in_window = 0  # actual micro-batches accumulated since last step
 
     amp_device_type = "cuda" if isinstance(device, str) and device.startswith("cuda") else "cpu"
 
-    def _flush_gradients():
+    def _flush_gradients(window_count):
+        # Average the accumulated gradients over the actual number of
+        # micro-batches in this window. Doing the division at flush time
+        # (instead of pre-dividing each loss by ``accumulation_steps``) keeps
+        # the scaling correct even when the final window is partial.
+        if window_count > 1:
+            for p in model.parameters():
+                if p.grad is not None:
+                    p.grad.div_(window_count)
         if max_grad_norm is not None:
             if scaler is not None and use_amp:
                 scaler.unscale_(optimizer)
@@ -298,25 +307,25 @@ def train_one_epoch(
 
         with torch.amp.autocast(device_type=amp_device_type, enabled=use_amp):
             out = model(xb)
-            loss = loss_fn(out, yb) / accumulation_steps
+            loss = loss_fn(out, yb)
 
         if scaler is not None and use_amp:
             scaler.scale(loss).backward()
         else:
             loss.backward()
-        accumulated = True
+        microbatches_in_window += 1
 
         if (step + 1) % accumulation_steps == 0:
-            _flush_gradients()
-            accumulated = False
+            _flush_gradients(microbatches_in_window)
+            microbatches_in_window = 0
 
-        total_loss += loss.item() * accumulation_steps
+        total_loss += loss.item()
         num_batches += 1
         pbar.set_postfix(loss=f"{total_loss / num_batches:.4f}")
 
     # Flush any gradients from a partial final accumulation window.
-    if accumulated:
-        _flush_gradients()
+    if microbatches_in_window > 0:
+        _flush_gradients(microbatches_in_window)
 
     return total_loss / num_batches if num_batches > 0 else 0.0
 
@@ -469,10 +478,16 @@ def train_one_epoch_multitask(
     model.train()
     task_weights = task_weights or {}
     accumulation_steps = max(1, accumulation_steps)
-    accumulated = False  # tracks whether gradients are pending a flush
+    microbatches_in_window = 0  # actual micro-batches accumulated since last step
     amp_device_type = "cuda" if isinstance(device, str) and device.startswith("cuda") else "cpu"
 
-    def _flush_gradients():
+    def _flush_gradients(window_count):
+        # Average accumulated gradients over the actual window size so a
+        # partial trailing window stays correctly scaled.
+        if window_count > 1:
+            for p in model.parameters():
+                if p.grad is not None:
+                    p.grad.div_(window_count)
         if max_grad_norm is not None:
             if scaler is not None and use_amp:
                 scaler.unscale_(optimizer)
@@ -522,25 +537,24 @@ def train_one_epoch_multitask(
 
             if loss_total is None:
                 continue
-            loss_total = loss_total / accumulation_steps
 
         if scaler is not None and use_amp:
             scaler.scale(loss_total).backward()
         else:
             loss_total.backward()
-        accumulated = True
+        microbatches_in_window += 1
 
         if (step + 1) % accumulation_steps == 0:
-            _flush_gradients()
-            accumulated = False
+            _flush_gradients(microbatches_in_window)
+            microbatches_in_window = 0
 
-        total_loss += loss_total.item() * accumulation_steps
+        total_loss += loss_total.item()
         num_batches += 1
         pbar.set_postfix(loss=f"{total_loss / max(1, num_batches):.4f}")
 
     # Flush any gradients from a partial final accumulation window.
-    if accumulated:
-        _flush_gradients()
+    if microbatches_in_window > 0:
+        _flush_gradients(microbatches_in_window)
 
     return total_loss / num_batches if num_batches > 0 else 0.0
 
@@ -581,7 +595,8 @@ def evaluate_multitask(model, val_loader, loss_fns, device, task_weights=None, u
                     targets = yb.index_select(0, idx)
                     lfn = loss_fns.get(task, loss_fns.get("_default"))
                     if lfn is not None:
-                        l = lfn(logits, targets).item()
+                        weight = float(task_weights.get(task, 1.0))
+                        l = lfn(logits, targets).item() * weight
                         per_task_loss_sum[task] = per_task_loss_sum.get(task, 0.0) + l
                         per_task_batches[task] = per_task_batches.get(task, 0) + 1
                     pred = logits.argmax(dim=-1)

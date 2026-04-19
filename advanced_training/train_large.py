@@ -79,8 +79,12 @@ def parse_args():
                         default="warmup_cosine")
     parser.add_argument("--warmup-epochs", type=int, default=3,
                         help="Warmup epochs when scheduler=warmup_cosine.")
-    parser.add_argument("--max-grad-norm", type=float, default=1.0,
-                        help="Gradient clipping threshold (None to disable).")
+    parser.add_argument(
+        "--max-grad-norm",
+        type=lambda value: None if value.lower() == "none" else float(value),
+        default=1.0,
+        help="Gradient clipping threshold (pass 'none' to disable).",
+    )
     parser.add_argument("--label-smoothing", type=float, default=0.05,
                         help="Label smoothing for CrossEntropyLoss (discard head).")
     parser.add_argument("--accumulation-steps", type=int, default=1,

@@ -163,6 +163,11 @@ def _generate_fulou_negatives(kyoku_log, discard_index):
         nxt = kyoku_log[k]
         if "fulou" in nxt:
             called_by = nxt["fulou"]["l"]
+        elif "hule" in nxt:
+            # Ron resolves the discard immediately and pre-empts any fulou.
+            # Skip negatives entirely so we don't penalize callers who never
+            # had the chance to act.
+            return
         break  # only inspect the immediate next event
 
     hands = _reconstruct_hands_up_to(kyoku_log, discard_index)
@@ -263,7 +268,7 @@ class MahjongDataset(Dataset):
         samples: Pre-loaded samples (for creating subsets).
         verbose: Whether to show progress during loading.
         collect_all_actions: If True, also emit riichi/chi/pon/kan/agari
-            samples. If False (default), only 'discard' samples are kept.
+            samples. If False (default), only 'dapai' samples are kept.
     """
 
     def __init__(
@@ -339,7 +344,14 @@ class MahjongDataset(Dataset):
         return state_tensor, label, action_type
 
     def filter_by_action(self, action_type):
-        """Return a new dataset containing only samples of a specific action type."""
+        """Return a new dataset containing only samples of a specific action type.
+
+        Accepts the legacy alias ``"discard"`` as a synonym for ``"dapai"`` so
+        older callers (train.py, evaluate_model.py, mahjong_ai_coatnet_v2.py)
+        keep working after the rename to 牌譜形式 keys.
+        """
+        if action_type == "discard":
+            action_type = "dapai"
         filtered_samples = []
         filtered_games = []
         for s, g in zip(self.samples, self.game_ids):
