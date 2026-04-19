@@ -126,4 +126,4 @@ decision = agent.on_opponent_dapai(kyoku_log, log_index=..., my_player_id=0,
 | `coatnet_large` | CoAtNet | チャネル [128,192,256]、ブロック [3,3,6]、ヘッド 8 |
 | `resnet_large` | ResNet | チャネル [128,192,256,320]、ブロック [3,4,6,3] |
 | `vit_large` | ViT | embed 512、深さ 8、CLSトークン・trunc_normal初期化・Stochastic Depth・Flash Attention (SDPA) |
-| `coatnet_multitask_large` 等 | 同上 | 共有バックボーン + 6タスクヘッド（discard/riichi/chi/pon/kan/agari） |
+| `coatnet_multitask_large` 等 | 同上 | 共有バックボーン + 5ヘッド（`dapai` / `riichi` / `fulou` / `gang` / `hule`）。`fulou` は鳴き（`chi` / `pon` など）を扱う multi-class head、`gang` も multi-class head |
