@@ -132,18 +132,17 @@ def _resolve_run_dir(args):
 
 def _build_loss(args, is_multitask):
     if is_multitask:
-        # Per-head losses; discard uses label smoothing, binaries do not.
+        # Per-head losses using 牌譜形式 head names; dapai uses label smoothing.
         loss_fns = {
-            "discard": nn.CrossEntropyLoss(label_smoothing=args.label_smoothing),
+            "dapai":  nn.CrossEntropyLoss(label_smoothing=args.label_smoothing),
             "riichi": nn.CrossEntropyLoss(),
-            "chi": nn.CrossEntropyLoss(),
-            "pon": nn.CrossEntropyLoss(),
-            "kan": nn.CrossEntropyLoss(),
-            "agari": nn.CrossEntropyLoss(),
+            "fulou":  nn.CrossEntropyLoss(),
+            "gang":   nn.CrossEntropyLoss(),
+            "hule":   nn.CrossEntropyLoss(),
             "_default": nn.CrossEntropyLoss(),
         }
-        task_weights = {"discard": 1.0, "riichi": 0.5, "chi": 0.3,
-                        "pon": 0.3, "kan": 0.2, "agari": 0.5}
+        task_weights = {"dapai": 1.0, "riichi": 0.5, "fulou": 0.4,
+                        "gang": 0.3, "hule": 0.5}
         return loss_fns, task_weights
     return nn.CrossEntropyLoss(label_smoothing=args.label_smoothing), None
 
@@ -195,9 +194,9 @@ def main():
             split_by_game=args.split_by_game,
         )
     else:
-        discard_dataset = dataset.filter_by_action("discard")
+        discard_dataset = dataset.filter_by_action("dapai")
         if len(discard_dataset) == 0:
-            raise RuntimeError("No discard samples found across provided archives.")
+            raise RuntimeError("No dapai samples found across provided archives.")
         train_loader, val_loader = create_dataloaders(
             discard_dataset,
             train_ratio=args.train_ratio,
@@ -234,7 +233,9 @@ def main():
         config=vars(args),
     )
 
-    scaler = torch.amp.GradScaler(device=device) if args.amp else None
+    # GradScaler requires the base device type ("cuda"), not "cuda:N".
+    _amp_device = device.split(":")[0] if isinstance(device, str) else "cpu"
+    scaler = torch.amp.GradScaler(device=_amp_device) if args.amp else None
     ema = ModelEMA(model, decay=args.ema_decay) if args.ema_decay > 0 else None
 
     # ---- Resume ----

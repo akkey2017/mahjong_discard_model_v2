@@ -2,9 +2,9 @@
 Inference wrapper that turns a trained checkpoint into a playable agent.
 
 The agent accepts a running kyoku log (same shape used at training time) and
-returns a decision dict in the *same* moupa record format (``{'dapai': ...}``,
-``{'fulou': ...}`` etc.), so it can be plugged into existing game-replay or
-online-play infrastructure.
+returns a decision dict with an ``"action"`` key whose value is a 牌譜形式
+action name (``"dapai"``, ``"riichi"``, ``"gang"``, ``"hule"``, or ``"pass"``).
+Additional keys (``"tile"``, ``"confidence"``) are included where relevant.
 
 Usage::
 
@@ -85,8 +85,8 @@ class MahjongAgent:
             out = self.model(x)
         if isinstance(out, dict):
             return out
-        # Single-head DiscardModel: expose the one head
-        return {"discard": out}
+        # Single-head DiscardModel: expose as "dapai" head.
+        return {"dapai": out}
 
     # ---- decision endpoints -------------------------------------------
 
@@ -100,14 +100,14 @@ class MahjongAgent:
         """
         x = self._encode(kyoku_log, log_index, player_id)
         heads = self._forward_heads(x)
-        logits = heads["discard"][0]
+        logits = heads["dapai"][0]
         if forbid_tiles:
             logits = logits.clone()
             for t in forbid_tiles:
                 logits[t] = float("-inf")
         tile_id = int(logits.argmax().item())
         return {
-            "action": "discard",
+            "action": "dapai",
             "tile_id": tile_id,
             "tile": _ID_TO_TILE_34[tile_id],
             "confidence": float(F.softmax(logits, dim=-1)[tile_id]),
@@ -158,28 +158,34 @@ class MahjongAgent:
         x = self._encode(kyoku_log, discard_index, my_player_id)
         heads = self._forward_heads(x)
 
-        def _yes(head):
-            if head not in heads:
-                return 0.0
-            return float(F.softmax(heads[head][0], dim=-1)[1])
+        if "fulou" not in heads:
+            return {"action": "pass"}
 
-        options = []
-        if kan_ok:
-            options.append(("daiminkan", _yes("kan")))
-        if pon_ok:
-            options.append(("pon", _yes("pon")))
-        if chi_ok:
-            options.append(("chi", _yes("chi")))
-        # Pick highest-confidence call above 0.5; otherwise pass.
-        options.sort(key=lambda x: x[1], reverse=True)
-        best_action, best_prob = options[0]
-        if best_prob >= 0.5:
-            return {"action": best_action, "confidence": best_prob}
-        return {"action": "pass"}
+        # fulou head: 0=pass, 1=chi, 2=pon, 3=daiminkan
+        probs = F.softmax(heads["fulou"][0], dim=-1)
+        # Mask out impossible calls.
+        masked = probs.clone()
+        masked[0] = 0.0  # "pass" is always structurally possible; keep it for comparison
+        if not chi_ok:
+            masked[1] = 0.0
+        if not pon_ok:
+            masked[2] = 0.0
+        if not kan_ok:
+            masked[3] = 0.0
+
+        best_idx = int(masked.argmax().item())
+        best_prob = float(probs[best_idx])
+        _IDX_TO_ACTION = {1: "chi", 2: "pon", 3: "daiminkan"}
+        if best_idx == 0 or best_prob < 0.5:
+            return {"action": "pass"}
+        return {"action": _IDX_TO_ACTION[best_idx], "confidence": best_prob}
 
     def decide_ankan(self, kyoku_log, log_index, player_id,
                      my_hand_str: str) -> bool:
-        """Return True iff ankan is possible and the kan head prefers it."""
+        """Return True iff ankan is possible and the gang head prefers it.
+
+        gang head: 0=pass, 1=ankan, 2=kakan.
+        """
         if not self.is_multitask:
             return False
         hand37 = hand_counter_from_str(my_hand_str)
@@ -187,19 +193,20 @@ class MahjongAgent:
             return False
         x = self._encode(kyoku_log, log_index, player_id)
         heads = self._forward_heads(x)
-        if "kan" not in heads:
+        if "gang" not in heads:
             return False
-        probs = F.softmax(heads["kan"][0], dim=-1)
-        return bool(probs.argmax().item() == 1)
+        probs = F.softmax(heads["gang"][0], dim=-1)
+        # Prefer ankan (idx=1) over pass (idx=0); ignore kakan (idx=2) here.
+        return bool(probs[1] > probs[0])
 
     # ---- high-level convenience ---------------------------------------
 
     def on_zimo(self, kyoku_log, log_index, player_id,
                 my_hand_str: Optional[str] = None) -> Dict:
-        """Top-level choice after self-draw: discard / riichi / ankan."""
+        """Top-level choice after self-draw: dapai / riichi / gang (ankan)."""
         # Ankan first (most committing)
         if my_hand_str and self.decide_ankan(kyoku_log, log_index, player_id, my_hand_str):
-            return {"action": "ankan"}
+            return {"action": "gang"}
         if self.decide_riichi(kyoku_log, log_index, player_id):
             tile = self.decide_discard(kyoku_log, log_index, player_id)
             tile["action"] = "riichi"

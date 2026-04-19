@@ -2,23 +2,18 @@
 Dataset handling for mahjong game records.
 
 Each *sample* is a tuple ``(kyoku_log, log_index, player_id, action_type, label)``
-where ``action_type`` is one of:
+where ``action_type`` and ``label`` follow 牌譜形式 (game record format) key names:
 
-    "discard"       -> label: 0..33 (tile to discard; 34 standard tiles)
-    "riichi"        -> label: 0/1   (declare riichi on this discard or not)
-    "chi"           -> label: 1     (called chi on prior opponent dapai)
-    "pon"           -> label: 1     (called pon)
-    "daiminkan"     -> label: 1     (called daiminkan)
-    "ankan"         -> label: 1     (declared ankan)
-    "kakan"         -> label: 1     (declared kakan)
-    "tsumo"         -> label: 1     (declared tsumo agari)
-    "ron"           -> label: 1     (declared ron agari)
+    "dapai"   -> label: 0..33 (tile index; 34 standard tiles)
+    "riichi"  -> label: 0/1   (declare riichi or not; negative emitted for every dapai)
+    "fulou"   -> label: 0=pass, 1=chi, 2=pon, 3=daiminkan
+    "gang"    -> label: 0=pass/no-gang, 1=ankan, 2=kakan
+    "hule"    -> label: 1=win (tsumo or ron; no negatives synthesized)
 
-Negative samples for call/riichi/agari can be synthesized via
-:func:`generate_fulou_negatives` (requires utils/mahjong_rules.py helpers).
+Negative samples for fulou (label=0) can be synthesized via ``include_fulou_negatives``.
 
-Backwards-compatible: the historical dataset contained only ``"discard"``
-samples; pass ``collect_all_actions=False`` to keep that behaviour.
+Backwards-compatible: the historical dataset contained only ``"dapai"`` samples;
+pass ``collect_all_actions=False`` to keep that behaviour.
 """
 
 import hashlib
@@ -177,14 +172,9 @@ def _generate_fulou_negatives(kyoku_log, discard_index):
         pon_ok = can_pon(hands[seat], tile_37)
         kan_ok = can_daiminkan(hands[seat], tile_37)
 
-        # Emit a "call pass" negative for the strongest available call type.
-        # (Keeps label space small; matches the training loop's binary heads.)
-        if kan_ok:
-            yield (kyoku_log, discard_index, seat, "kan", 0)
-        elif pon_ok:
-            yield (kyoku_log, discard_index, seat, "pon", 0)
-        elif chi_ok:
-            yield (kyoku_log, discard_index, seat, "chi", 0)
+        # Emit one fulou-pass negative per eligible player.
+        if kan_ok or pon_ok or chi_ok:
+            yield (kyoku_log, discard_index, seat, "fulou", 0)
 
 
 def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
@@ -199,6 +189,9 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
     if not kyoku_log or "qipai" not in kyoku_log[0]:
         return
 
+    _FULOU_LABEL = {"chi": 1, "pon": 2, "daiminkan": 3}
+    _GANG_LABEL = {"ankan": 1, "kakan": 2}
+
     for i, move in enumerate(kyoku_log):
         if "dapai" in move:
             p_id = move["dapai"]["l"]
@@ -208,15 +201,13 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
                 continue
             tile_id_37 = FEATURE_TILE_MAP[tile_str]
             label = _process_single_number(tile_id_37)
-            # discard label
-            yield (kyoku_log, i, p_id, "discard", label)
+            yield (kyoku_log, i, p_id, "dapai", label)
 
             if not collect_all_actions:
                 continue
 
-            # riichi flag is encoded as '*' inside raw (FIX: previously dropped)
-            if "*" in raw:
-                yield (kyoku_log, i, p_id, "riichi", 1)
+            # Emit riichi decision for every dapai: 1 if declared, 0 otherwise.
+            yield (kyoku_log, i, p_id, "riichi", 1 if "*" in raw else 0)
 
             if include_fulou_negatives:
                 yield from _generate_fulou_negatives(kyoku_log, i)
@@ -227,7 +218,7 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
                 call_type = classify_fulou(move["fulou"]["m"])
             except Exception:
                 continue
-            yield (kyoku_log, i, p_id, call_type, 1)
+            yield (kyoku_log, i, p_id, "fulou", _FULOU_LABEL[call_type])
 
         elif collect_all_actions and "gang" in move:
             p_id = move["gang"]["l"]
@@ -235,12 +226,11 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
                 gang_type = classify_gang(move["gang"]["m"])
             except Exception:
                 continue
-            yield (kyoku_log, i, p_id, gang_type, 1)
+            yield (kyoku_log, i, p_id, "gang", _GANG_LABEL[gang_type])
 
         elif collect_all_actions and "hule" in move:
             p_id = move["hule"]["l"]
-            baojia = move["hule"].get("baojia")
-            yield (kyoku_log, i, p_id, "tsumo" if baojia is None else "ron", 1)
+            yield (kyoku_log, i, p_id, "hule", 1)
 
 
 class MahjongDataset(Dataset):

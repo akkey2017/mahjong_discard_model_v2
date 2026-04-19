@@ -144,7 +144,9 @@ def load_checkpoint(filepath, map_location="cpu"):
     Falls back to plain state_dict (for backwards-compat with old files) by
     returning ``{"model_state": <state_dict>, "model_type": None, "config": {}}``.
     """
-    obj = torch.load(filepath, map_location=map_location, weights_only=False)
+    # weights_only=True prevents arbitrary code execution from untrusted files.
+    # Our checkpoints contain only tensors and primitive Python types (str/int/float/list/dict).
+    obj = torch.load(filepath, map_location=map_location, weights_only=True)
     if isinstance(obj, dict) and "model_state" in obj:
         return obj
     return {"model_state": obj, "model_type": None, "config": {}, "extra": {}}
@@ -250,8 +252,21 @@ def train_one_epoch(
     total_loss = 0.0
     num_batches = 0
     accumulation_steps = max(1, accumulation_steps)
+    accumulated = False  # tracks whether gradients are pending a flush
 
     amp_device_type = "cuda" if isinstance(device, str) and device.startswith("cuda") else "cpu"
+
+    def _flush_gradients():
+        if max_grad_norm is not None:
+            if scaler is not None and use_amp:
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        if scaler is not None and use_amp:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
     optimizer.zero_grad(set_to_none=True)
     pbar = tqdm(train_loader, desc="Training", leave=True, file=sys.stderr,
@@ -267,26 +282,19 @@ def train_one_epoch(
             scaler.scale(loss).backward()
         else:
             loss.backward()
+        accumulated = True
 
         if (step + 1) % accumulation_steps == 0:
-            if max_grad_norm is not None:
-                if scaler is not None and use_amp:
-                    scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-
-            if scaler is not None and use_amp:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+            _flush_gradients()
+            accumulated = False
 
         total_loss += loss.item() * accumulation_steps
         num_batches += 1
+        pbar.set_postfix(loss=f"{total_loss / num_batches:.4f}")
 
-        if num_batches > 0:
-            avg_loss = total_loss / num_batches
-            pbar.set_postfix(loss=f"{avg_loss:.4f}")
+    # Flush any gradients from a partial final accumulation window.
+    if accumulated:
+        _flush_gradients()
 
     return total_loss / num_batches if num_batches > 0 else 0.0
 
@@ -391,7 +399,7 @@ class ModelEMA:
 
     Keeps a shadow copy of ``model`` and updates it as
     ``v_t = decay * v_{t-1} + (1 - decay) * param_t`` after each optimizer step.
-    Call :meth:`apply_to` around evaluation to swap weights in/out.
+    Access the EMA model via the ``.ema`` attribute for evaluation.
     """
 
     def __init__(self, model, decay=0.9999):
@@ -439,7 +447,20 @@ def train_one_epoch_multitask(
     model.train()
     task_weights = task_weights or {}
     accumulation_steps = max(1, accumulation_steps)
+    accumulated = False  # tracks whether gradients are pending a flush
     amp_device_type = "cuda" if isinstance(device, str) and device.startswith("cuda") else "cpu"
+
+    def _flush_gradients():
+        if max_grad_norm is not None:
+            if scaler is not None and use_amp:
+                scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+        if scaler is not None and use_amp:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
 
     total_loss = 0.0
     num_batches = 0
@@ -485,22 +506,19 @@ def train_one_epoch_multitask(
             scaler.scale(loss_total).backward()
         else:
             loss_total.backward()
+        accumulated = True
 
         if (step + 1) % accumulation_steps == 0:
-            if max_grad_norm is not None:
-                if scaler is not None and use_amp:
-                    scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
-            if scaler is not None and use_amp:
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                optimizer.step()
-            optimizer.zero_grad(set_to_none=True)
+            _flush_gradients()
+            accumulated = False
 
         total_loss += loss_total.item() * accumulation_steps
         num_batches += 1
         pbar.set_postfix(loss=f"{total_loss / max(1, num_batches):.4f}")
+
+    # Flush any gradients from a partial final accumulation window.
+    if accumulated:
+        _flush_gradients()
 
     return total_loss / num_batches if num_batches > 0 else 0.0
 

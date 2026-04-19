@@ -81,7 +81,7 @@ class ExperimentLogger:
         if config_path.exists():
             config = json.loads(config_path.read_text())
             model_type = config.get("model", "unknown")
-        return cls(
+        inst = cls(
             run_dir=run_dir,
             model_type=model_type,
             config=config,
@@ -90,6 +90,22 @@ class ExperimentLogger:
             best_checkpoint=run_dir / "best_model.pth",
             last_checkpoint=run_dir / "last_model.pth",
         )
+        # Re-attach file logger so resumed runs continue writing to training.log.
+        logger = logging.getLogger(f"experiment.{run_dir.name}")
+        logger.setLevel(logging.INFO)
+        if not any(isinstance(h, logging.FileHandler) and Path(h.baseFilename) == inst.log_path
+                   for h in logger.handlers):
+            fh = logging.FileHandler(inst.log_path, encoding="utf-8")
+            fh.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+            logger.addHandler(fh)
+        inst._logger = logger
+        # Restore the existing CSV header so resumed rows use the same column order.
+        if inst.metrics_path.exists() and inst.metrics_path.stat().st_size > 0:
+            with inst.metrics_path.open(newline="") as f:
+                header = next(csv.reader(f), None)
+                if header:
+                    inst._metrics_fieldnames = header
+        return inst
 
     def _init_files(self) -> None:
         (self.run_dir / "config.json").write_text(

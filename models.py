@@ -455,15 +455,14 @@ def create_vit_model(in_channels=380, num_classes=34, dropout=0.0):
 
 # ==================== Multi-Task Model ====================
 
-# Action heads and their output sizes. Used by MultiTaskDiscardModel and by
-# the training pipeline to route labels to the appropriate head.
+# Action heads and their output sizes. Head names match 牌譜形式 (game record format) keys.
+# Used by MultiTaskDiscardModel and the training pipeline to route labels to the correct head.
 MULTITASK_HEAD_SPECS = {
-    "discard": 34,       # Which tile to discard (34 standard tiles)
-    "riichi": 2,         # Declare riichi or not
-    "chi": 2,            # Call chi or not
-    "pon": 2,            # Call pon or not
-    "kan": 2,            # Call ankan/kakan/daiminkan or not (binary)
-    "agari": 2,          # Declare tsumo/ron agari or not
+    "dapai":  34,   # Which tile to discard (34 standard tiles)
+    "riichi":  2,   # Declare riichi (1) or not (0)
+    "fulou":   4,   # 0=pass, 1=chi, 2=pon, 3=daiminkan
+    "gang":    3,   # 0=pass/no-gang, 1=ankan, 2=kakan
+    "hule":    2,   # 0=pass, 1=win (tsumo or ron)
 }
 
 
