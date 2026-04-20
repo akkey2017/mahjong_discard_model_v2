@@ -10,6 +10,23 @@ from torch.optim.lr_scheduler import CosineAnnealingLR, LambdaLR, ReduceLROnPlat
 from tqdm import tqdm
 
 
+def _amp_device_type(device):
+    """Return a device-type string compatible with :mod:`torch.amp`.
+
+    Accepts either a ``str`` (e.g. ``"cuda"``, ``"cuda:0"``, ``"mps"``) or a
+    :class:`torch.device` instance. Indices and sub-device suffixes are
+    stripped. Unsupported types fall back to ``"cpu"`` so autocast does not
+    silently run on a device it cannot accelerate.
+    """
+    if isinstance(device, torch.device):
+        kind = device.type
+    else:
+        kind = str(device).split(":", 1)[0]
+    if kind in ("cuda", "cpu", "mps", "xpu"):
+        return kind
+    return "cpu"
+
+
 class TopKAccuracy:
     """Calculate top-k accuracy metric."""
     
@@ -262,6 +279,7 @@ def train_one_epoch(
     scaler=None,
     use_amp=False,
     accumulation_steps=1,
+    ema=None,
 ):
     """Train the model for one epoch.
 
@@ -275,6 +293,9 @@ def train_one_epoch(
         scaler: ``torch.amp.GradScaler`` instance for mixed-precision training
         use_amp: Whether to run forward under ``torch.amp.autocast``
         accumulation_steps: Number of micro-batches per optimizer step
+        ema: Optional :class:`ModelEMA` instance; updated after every optimizer
+            step (i.e. every ``accumulation_steps`` micro-batches) so the
+            effective decay matches what the constructor's ``decay`` value implies.
 
     Returns:
         Average training loss
@@ -285,7 +306,7 @@ def train_one_epoch(
     accumulation_steps = max(1, accumulation_steps)
     microbatches_in_window = 0  # actual micro-batches accumulated since last step
 
-    amp_device_type = "cuda" if isinstance(device, str) and device.startswith("cuda") else "cpu"
+    amp_device_type = _amp_device_type(device)
 
     def _flush_gradients(window_count):
         # Average the accumulated gradients over the actual number of
@@ -306,6 +327,8 @@ def train_one_epoch(
         else:
             optimizer.step()
         optimizer.zero_grad(set_to_none=True)
+        if ema is not None:
+            ema.update(model)
 
     optimizer.zero_grad(set_to_none=True)
     pbar = tqdm(train_loader, desc="Training", leave=True, file=sys.stderr,
@@ -356,8 +379,8 @@ def evaluate(model, val_loader, loss_fn, device, metrics=None, use_amp=False):
     model.eval()
     total_loss = 0.0
     num_batches = 0
-    amp_device_type = "cuda" if isinstance(device, str) and device.startswith("cuda") else "cpu"
-    
+    amp_device_type = _amp_device_type(device)
+
     # Reset metrics
     if metrics:
         for metric in metrics.values():
@@ -469,6 +492,7 @@ def train_one_epoch_multitask(
     scaler=None,
     use_amp=False,
     accumulation_steps=1,
+    ema=None,
 ):
     """Multi-task training epoch.
 
@@ -481,13 +505,14 @@ def train_one_epoch_multitask(
         train_loader: yields (x, y, action_type_list_or_tensor).
         loss_fns: dict mapping head name -> loss function.
         task_weights: dict mapping head name -> scalar weight (default 1.0).
+        ema: Optional :class:`ModelEMA` instance; updated after every optimizer step.
         Others: same as :func:`train_one_epoch`.
     """
     model.train()
     task_weights = task_weights or {}
     accumulation_steps = max(1, accumulation_steps)
     microbatches_in_window = 0  # actual micro-batches accumulated since last step
-    amp_device_type = "cuda" if isinstance(device, str) and device.startswith("cuda") else "cpu"
+    amp_device_type = _amp_device_type(device)
 
     def _flush_gradients(window_count):
         # Average accumulated gradients over the actual window size so a
@@ -506,6 +531,8 @@ def train_one_epoch_multitask(
         else:
             optimizer.step()
         optimizer.zero_grad(set_to_none=True)
+        if ema is not None:
+            ema.update(model)
 
     total_loss = 0.0
     num_batches = 0
@@ -577,7 +604,7 @@ def evaluate_multitask(model, val_loader, loss_fns, device, task_weights=None, u
     """
     model.eval()
     task_weights = task_weights or {}
-    amp_device_type = "cuda" if isinstance(device, str) and device.startswith("cuda") else "cpu"
+    amp_device_type = _amp_device_type(device)
 
     per_task_correct = {}
     per_task_total = {}

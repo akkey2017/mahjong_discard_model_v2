@@ -36,7 +36,7 @@ from mahjong_ai_features import (
     _make_pai_counter_list_from,
     _fulou_to_pais,
 )
-from mahjong_rules import can_ankan, can_chi, can_pon, can_daiminkan
+from mahjong_rules import can_ankan, can_chi, can_pon, can_daiminkan, tile_count, normalize_red_five
 
 
 # ----- helpers for fulou/gang classification ------------------------------
@@ -179,12 +179,11 @@ def _reconstruct_hands_up_to(kyoku_log, stop_index):
     return hands
 
 
-def _generate_fulou_negatives(kyoku_log, discard_index):
-    """For a discarded tile, yield '_pass' negative samples for each
-    non-discarder who COULD have called but didn't.
+def _generate_fulou_negatives(kyoku_log, discard_index, hands):
+    """Yield fulou=0 (pass) negatives for players who could have called but didn't.
 
-    Uses a light-weight local check (can_chi/can_pon/can_daiminkan) rather
-    than a full tenpai engine.
+    ``hands`` must reflect the state *just before* ``kyoku_log[discard_index]``
+    (i.e. the incremental state maintained by the caller — no reconstruction).
     """
     move = kyoku_log[discard_index]
     if "dapai" not in move:
@@ -195,33 +194,40 @@ def _generate_fulou_negatives(kyoku_log, discard_index):
     if tile_37 is None:
         return
 
-    # Next real event in the log determines whether someone actually called.
+    # Look at the immediate next event to decide if the discard was claimed or
+    # resolved by ron before any other player could act.
     called_by = None
     for k in range(discard_index + 1, len(kyoku_log)):
         nxt = kyoku_log[k]
         if "fulou" in nxt:
             called_by = nxt["fulou"]["l"]
         elif "hule" in nxt:
-            # Ron resolves the discard immediately and pre-empts any fulou.
-            # Skip negatives entirely so we don't penalize callers who never
-            # had the chance to act.
+            # Ron pre-empts all other calls — no valid "didn't call" negatives.
             return
         break  # only inspect the immediate next event
-
-    hands = _reconstruct_hands_up_to(kyoku_log, discard_index)
 
     for seat in range(4):
         if seat == discarder or seat == called_by:
             continue
-        # Chi is only legal from kamicha (upper seat). Upper seat = (self-1)%4
-        from_shimocha = ((discarder + 1) % 4) != seat  # discarder is kamicha iff seat == discarder+1
+        from_shimocha = ((discarder + 1) % 4) != seat
         chi_ok = (not from_shimocha) and can_chi(hands[seat], tile_37, from_shimocha=False)
         pon_ok = can_pon(hands[seat], tile_37)
         kan_ok = can_daiminkan(hands[seat], tile_37)
-
-        # Emit one fulou-pass negative per eligible player.
         if kan_ok or pon_ok or chi_ok:
             yield (kyoku_log, discard_index, seat, "fulou", 0)
+
+
+def _has_kakan_option(hand37, pon_tiles):
+    """True if the player can add to any of their existing pon melds (kakan).
+
+    ``pon_tiles`` is a list of normalized tile_37 ids (red-5 collapsed to 5)
+    recorded when each pon was made.  ``tile_count`` handles the red-5 / normal-5
+    equivalence so both m0 and m5 in hand count toward a m5 pon.
+    """
+    for pon_tile in pon_tiles:
+        if tile_count(hand37, pon_tile) >= 1:
+            return True
+    return False
 
 
 def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
@@ -234,10 +240,11 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
         include_fulou_negatives: if True, synthesize fulou-pass samples (label 0)
             for other players who could have called but didn't.
 
-    Always (when ``collect_all_actions=True``) also emits:
+    When ``collect_all_actions=True`` also emits:
       - riichi 0/1 labels for every dapai
-      - gang=0 negatives for every dapai where the discarder held an ankan-able
-        quadruplet but chose to discard instead
+      - gang=0 negatives for every dapai where the discarder could have done
+        ankan *or* kakan but chose to discard instead
+      - fulou / gang / hule positive samples
     """
     if not kyoku_log or "qipai" not in kyoku_log[0]:
         return
@@ -245,10 +252,15 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
     _FULOU_LABEL = {"chi": 1, "pon": 2, "daiminkan": 3}
     _GANG_LABEL = {"ankan": 1, "kakan": 2}
 
-    # Incrementally reconstructed hands; used for gang-negative detection.
-    hands_cache = None
+    # Incrementally maintained game state.  We only need this when emitting
+    # anything beyond plain dapai samples.
     if collect_all_actions:
-        hands_cache = {}
+        hands = [_make_pai_counter_list_from(h) for h in kyoku_log[0]["qipai"]["shoupai"]]
+        rivers = [[], [], [], []]
+        # Normalized pon tile per player (for kakan feasibility checks).
+        pon_melds = [[], [], [], []]
+    else:
+        hands = rivers = pon_melds = None
 
     for i, move in enumerate(kyoku_log):
         if "dapai" in move:
@@ -256,41 +268,93 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
             raw = move["dapai"]["p"]
             tile_str = raw.replace("*", "").replace("_", "")
             if tile_str not in FEATURE_TILE_MAP:
+                # Skip unknown tile but still update state so subsequent moves
+                # are not reconstructed from a stale position.
+                if collect_all_actions:
+                    t = FEATURE_TILE_MAP.get(tile_str)
+                    if t is not None:
+                        hands[p_id][t] = max(0, hands[p_id][t] - 1)
+                        rivers[p_id].append(t)
                 continue
             tile_id_37 = FEATURE_TILE_MAP[tile_str]
             label = _process_single_number(tile_id_37)
             yield (kyoku_log, i, p_id, "dapai", label)
 
-            if not collect_all_actions:
-                continue
+            if collect_all_actions:
+                yield (kyoku_log, i, p_id, "riichi", 1 if "*" in raw else 0)
 
-            # Emit riichi decision for every dapai: 1 if declared, 0 otherwise.
-            yield (kyoku_log, i, p_id, "riichi", 1 if "*" in raw else 0)
+                # Gang negative: could have done ankan or kakan but chose to discard.
+                if can_ankan(hands[p_id]) or _has_kakan_option(hands[p_id], pon_melds[p_id]):
+                    yield (kyoku_log, i, p_id, "gang", 0)
 
-            # Gang negative: discarder had an ankan-ready quad but chose dapai.
-            if i not in hands_cache:
-                hands_cache[i] = _reconstruct_hands_up_to(kyoku_log, i)
-            if can_ankan(hands_cache[i][p_id]):
-                yield (kyoku_log, i, p_id, "gang", 0)
+                if include_fulou_negatives:
+                    yield from _generate_fulou_negatives(kyoku_log, i, hands)
 
-            if include_fulou_negatives:
-                yield from _generate_fulou_negatives(kyoku_log, i)
+                # Advance state: tile leaves hand, enters river.
+                hands[p_id][tile_id_37] = max(0, hands[p_id][tile_id_37] - 1)
+                rivers[p_id].append(tile_id_37)
 
-        elif collect_all_actions and "fulou" in move:
+        elif "zimo" in move:
+            if collect_all_actions:
+                p = move["zimo"]["l"]
+                t = FEATURE_TILE_MAP.get(move["zimo"]["p"])
+                if t is not None:
+                    hands[p][t] += 1
+
+        elif "gangzimo" in move:
+            if collect_all_actions:
+                p = move["gangzimo"]["l"]
+                t = FEATURE_TILE_MAP.get(move["gangzimo"]["p"])
+                if t is not None:
+                    hands[p][t] += 1
+
+        elif "fulou" in move:
             p_id = move["fulou"]["l"]
             try:
                 call_type = classify_fulou(move["fulou"]["m"])
             except Exception:
                 continue
-            yield (kyoku_log, i, p_id, "fulou", _FULOU_LABEL[call_type])
+            if collect_all_actions:
+                yield (kyoku_log, i, p_id, "fulou", _FULOU_LABEL[call_type])
 
-        elif collect_all_actions and "gang" in move:
+                # Advance state: remove consumed tiles, pop river of source seat.
+                meld = move["fulou"]["m"]
+                tiles = _fulou_to_pais(meld)
+                if tiles:
+                    from_p_id = _fulou_source_seat(p_id, meld)
+                    consumed = list(tiles)
+                    if rivers[from_p_id]:
+                        taken = rivers[from_p_id].pop()
+                        if taken in consumed:
+                            consumed.remove(taken)
+                    for t in consumed:
+                        hands[p_id][t] = max(0, hands[p_id][t] - 1)
+                    if call_type == "pon":
+                        # Record the normalized pon tile for future kakan checks.
+                        pon_melds[p_id].append(normalize_red_five(tiles[0]))
+
+        elif "gang" in move:
             p_id = move["gang"]["l"]
             try:
                 gang_type = classify_gang(move["gang"]["m"])
             except Exception:
                 continue
-            yield (kyoku_log, i, p_id, "gang", _GANG_LABEL[gang_type])
+            if collect_all_actions:
+                yield (kyoku_log, i, p_id, "gang", _GANG_LABEL[gang_type])
+
+                meld = move["gang"]["m"]
+                tiles = _fulou_to_pais(meld)
+                if tiles:
+                    if gang_type == "kakan":
+                        kakan_tile = tiles[-1]
+                        hands[p_id][kakan_tile] = max(0, hands[p_id][kakan_tile] - 1)
+                        # Remove the upgraded pon from tracking.
+                        norm = normalize_red_five(kakan_tile)
+                        if norm in pon_melds[p_id]:
+                            pon_melds[p_id].remove(norm)
+                    else:  # ankan
+                        for t in tiles:
+                            hands[p_id][t] = max(0, hands[p_id][t] - 1)
 
         elif collect_all_actions and "hule" in move:
             p_id = move["hule"]["l"]

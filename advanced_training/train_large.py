@@ -32,6 +32,7 @@ from utils import (  # noqa: E402
     ModelCheckpoint,
     ModelEMA,
     TopKAccuracy,
+    _amp_device_type,
     evaluate,
     evaluate_multitask,
     get_optimizer,
@@ -239,8 +240,7 @@ def main():
     )
 
     # GradScaler requires the base device type ("cuda"), not "cuda:N".
-    _amp_device = device.split(":")[0] if isinstance(device, str) else "cpu"
-    scaler = torch.amp.GradScaler(device=_amp_device) if args.amp else None
+    scaler = torch.amp.GradScaler(device=_amp_device_type(device)) if args.amp else None
     ema = ModelEMA(model, decay=args.ema_decay) if args.ema_decay > 0 else None
 
     # ---- Resume ----
@@ -334,9 +334,8 @@ def main():
                 max_grad_norm=args.max_grad_norm,
                 scaler=scaler, use_amp=args.amp,
                 accumulation_steps=args.accumulation_steps,
+                ema=ema,
             )
-            if ema:
-                ema.update(model)
             val_metrics = evaluate_multitask(
                 ema.ema if ema else model, val_loader, loss_obj, device,
                 task_weights=task_weights, use_amp=args.amp,
@@ -347,9 +346,8 @@ def main():
                 max_grad_norm=args.max_grad_norm,
                 scaler=scaler, use_amp=args.amp,
                 accumulation_steps=args.accumulation_steps,
+                ema=ema,
             )
-            if ema:
-                ema.update(model)
             val_metrics = evaluate(
                 ema.ema if ema else model, val_loader, loss_obj, device,
                 metrics={"top1_acc": top1_acc, "top3_acc": top3_acc},
