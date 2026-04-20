@@ -189,10 +189,32 @@ class DiscardModel(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.fc = nn.Linear(final_channels, num_classes)
 
+    def _extract_features(self, x):
+        # Prefer ``forward_features`` when the backbone advertises it — ViT
+        # returns a 2D pooled CLS representation through that path, which
+        # would otherwise be discarded by the spatial reshape in
+        # ``VisionTransformer.forward``.
+        if hasattr(self.backbone, "forward_features"):
+            x = self.backbone.forward_features(x)
+        else:
+            x = self.backbone(x)
+
+        if x.ndim == 4:
+            x = self.pool(x)
+            x = self.flat(x)
+        elif x.ndim == 3:
+            # Token-sequence backbones: use the leading token (CLS) as the
+            # pooled representation when present.
+            x = x[:, 0]
+        elif x.ndim != 2:
+            raise ValueError(
+                f"Unsupported backbone output shape {tuple(x.shape)}; "
+                "expected 2D pooled features, 3D token features, or 4D spatial features."
+            )
+        return x
+
     def forward(self, x):
-        x = self.backbone(x)
-        x = self.pool(x)
-        x = self.flat(x)
+        x = self._extract_features(x)
         x = self.norm(x)
         x = self.dropout(x)
         return self.fc(x)
@@ -492,10 +514,28 @@ class MultiTaskDiscardModel(nn.Module):
         })
         self.head_specs = dict(heads)
 
+    def _extract_features(self, x):
+        # Mirror ``DiscardModel._extract_features`` so ViT backbones route
+        # through ``forward_features`` and retain their CLS representation.
+        if hasattr(self.backbone, "forward_features"):
+            x = self.backbone.forward_features(x)
+        else:
+            x = self.backbone(x)
+
+        if x.ndim == 4:
+            x = self.pool(x)
+            x = self.flat(x)
+        elif x.ndim == 3:
+            x = x[:, 0]
+        elif x.ndim != 2:
+            raise ValueError(
+                f"Unsupported backbone output shape {tuple(x.shape)}; "
+                "expected 2D pooled features, 3D token features, or 4D spatial features."
+            )
+        return x
+
     def trunk(self, x):
-        x = self.backbone(x)
-        x = self.pool(x)
-        x = self.flat(x)
+        x = self._extract_features(x)
         x = self.norm(x)
         x = self.dropout(x)
         return x

@@ -481,12 +481,21 @@ class ModelEMA:
 
     @torch.no_grad()
     def update(self, model):
-        msd = model.state_dict()
-        for k, v in self.ema.state_dict().items():
+        # EMA only the learnable parameters.  Buffers (e.g. BatchNorm's
+        # running_mean / running_var / num_batches_tracked) already maintain
+        # their own running statistics and should be copied verbatim — EMA
+        # averaging would distort those statistics and hurt evaluation.
+        model_params = dict(model.named_parameters())
+        for k, v in self.ema.named_parameters():
+            src = model_params[k].detach()
             if v.dtype.is_floating_point:
-                v.mul_(self.decay).add_(msd[k].detach(), alpha=1.0 - self.decay)
+                v.mul_(self.decay).add_(src, alpha=1.0 - self.decay)
             else:
-                v.copy_(msd[k])
+                v.copy_(src)
+
+        model_buffers = dict(model.named_buffers())
+        for k, v in self.ema.named_buffers():
+            v.copy_(model_buffers[k].detach())
 
 
 def train_one_epoch_multitask(
