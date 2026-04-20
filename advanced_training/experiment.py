@@ -127,9 +127,16 @@ class ExperimentLogger:
         print(msg, file=sys.stderr, flush=True)
 
     def log_metrics(self, row: Dict[str, Any]) -> None:
-        """Append one epoch's metrics to metrics.csv."""
+        """Append one epoch's metrics to ``metrics.csv``.
+
+        The CSV header is extended on-the-fly whenever ``row`` introduces keys
+        that were not present in previous rows (e.g. a rare task like ``hule``
+        that only appears in a later validation split). When this happens the
+        file is rewritten with the expanded header so all historical rows
+        remain aligned to the current schema.
+        """
+        # First-ever call with no pre-loaded fieldnames: start a fresh CSV.
         if self._metrics_fieldnames is None:
-            # Lock field order on first call
             self._metrics_fieldnames = list(row.keys())
             write_header = not self.metrics_path.exists() or self.metrics_path.stat().st_size == 0
             mode = "w" if write_header else "a"
@@ -138,12 +145,30 @@ class ExperimentLogger:
                 if write_header:
                     writer.writeheader()
                 writer.writerow(row)
-        else:
-            # Align with existing header; add missing columns as empty.
-            aligned = {k: row.get(k, "") for k in self._metrics_fieldnames}
-            with self.metrics_path.open("a", newline="") as f:
+            return
+
+        new_keys = [k for k in row.keys() if k not in self._metrics_fieldnames]
+        if new_keys:
+            # Expand the schema and rewrite the CSV so old rows keep empty
+            # cells for the new columns rather than the new row dropping them.
+            existing_rows = []
+            if self.metrics_path.exists() and self.metrics_path.stat().st_size > 0:
+                with self.metrics_path.open(newline="") as f:
+                    existing_rows = list(csv.DictReader(f))
+            self._metrics_fieldnames = list(self._metrics_fieldnames) + new_keys
+            with self.metrics_path.open("w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=self._metrics_fieldnames)
-                writer.writerow(aligned)
+                writer.writeheader()
+                for old in existing_rows:
+                    writer.writerow({k: old.get(k, "") for k in self._metrics_fieldnames})
+                writer.writerow({k: row.get(k, "") for k in self._metrics_fieldnames})
+            return
+
+        # No new keys: append aligned row.
+        aligned = {k: row.get(k, "") for k in self._metrics_fieldnames}
+        with self.metrics_path.open("a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=self._metrics_fieldnames)
+            writer.writerow(aligned)
 
     def iter_metrics(self) -> Iterable[Dict[str, Any]]:
         if not self.metrics_path.exists():
