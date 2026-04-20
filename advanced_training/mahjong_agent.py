@@ -167,7 +167,11 @@ class MahjongAgent:
             # Single-head checkpoint can't decide calls; default to pass.
             return {"action": "pass"}
 
-        x = self._encode(kyoku_log, discard_index, my_player_id)
+        # StateEncoderV2.encode(idx) returns state *before* kyoku_log[idx], so
+        # pass ``discard_index + 1`` to include the triggering discard in the
+        # river/last-discard features.  This matches the fulou-positive
+        # training convention (state encoded at the fulou event index).
+        x = self._encode(kyoku_log, discard_index + 1, my_player_id)
         heads = self._forward_heads(x)
 
         if "fulou" not in heads:
@@ -223,17 +227,29 @@ class MahjongAgent:
 
     def on_zimo(self, kyoku_log, log_index, player_id,
                 my_hand_str: Optional[str] = None) -> Dict:
-        """Top-level choice after self-draw: dapai / riichi / gang (ankan)."""
+        """Top-level choice after a self-draw at ``kyoku_log[log_index]``.
+
+        ``log_index`` is the index of the just-observed zimo event.  Because
+        :meth:`StateEncoderV2.encode` returns the state *before* ``log_index``,
+        the internal decision helpers are invoked with ``log_index + 1`` so
+        the encoded state includes the drawn tile.
+        """
+        state_index = log_index + 1
         # Ankan first (most committing)
-        if my_hand_str and self.decide_ankan(kyoku_log, log_index, player_id, my_hand_str):
+        if my_hand_str and self.decide_ankan(kyoku_log, state_index, player_id, my_hand_str):
             return {"action": "gang"}
-        if self.decide_riichi(kyoku_log, log_index, player_id):
-            tile = self.decide_discard(kyoku_log, log_index, player_id)
+        if self.decide_riichi(kyoku_log, state_index, player_id):
+            tile = self.decide_discard(kyoku_log, state_index, player_id)
             tile["action"] = "riichi"
             return tile
-        return self.decide_discard(kyoku_log, log_index, player_id)
+        return self.decide_discard(kyoku_log, state_index, player_id)
 
     def on_opponent_dapai(self, kyoku_log, log_index, my_player_id,
                           my_hand_str: str) -> Dict:
-        """Alias for :meth:`decide_call`."""
+        """Alias for :meth:`decide_call`.
+
+        ``log_index`` is the index of the observed opponent ``dapai`` event;
+        :meth:`decide_call` internally encodes the state including that
+        discard.
+        """
         return self.decide_call(kyoku_log, log_index, my_player_id, my_hand_str)

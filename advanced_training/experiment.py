@@ -57,6 +57,15 @@ class ExperimentLogger:
         base.mkdir(parents=True, exist_ok=True)
         name = run_name or f"{model_type}_{_timestamp()}"
         run_dir = base / name
+        # Refuse to silently clobber an existing non-empty run directory —
+        # otherwise ``--run-name`` collisions would overwrite config.json and
+        # append to training.log/metrics.csv of a prior experiment.
+        if run_dir.exists() and any(run_dir.iterdir()):
+            raise FileExistsError(
+                f"Run directory '{run_dir}' already exists and is not empty. "
+                f"Choose a different --run-name, delete the directory, or use "
+                f"--resume to continue the previous run."
+            )
         run_dir.mkdir(parents=True, exist_ok=True)
 
         inst = cls(

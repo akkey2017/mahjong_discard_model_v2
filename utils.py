@@ -305,18 +305,20 @@ def train_one_epoch(
     num_batches = 0
     accumulation_steps = max(1, accumulation_steps)
     microbatches_in_window = 0  # actual micro-batches accumulated since last step
+    samples_in_window = 0       # total samples whose loss was accumulated
 
     amp_device_type = _amp_device_type(device)
 
-    def _flush_gradients(window_count):
-        # Average the accumulated gradients over the actual number of
-        # micro-batches in this window. Doing the division at flush time
-        # (instead of pre-dividing each loss by ``accumulation_steps``) keeps
-        # the scaling correct even when the final window is partial.
-        if window_count > 1:
+    def _flush_gradients(sample_count):
+        # Normalize the accumulated gradients by the total number of samples
+        # in the window so each sample contributes equally regardless of
+        # batch size (e.g. the last micro-batch may be smaller than the rest).
+        # This is equivalent to running a single forward/backward over the
+        # concatenated window with ``reduction="mean"``.
+        if sample_count > 1:
             for p in model.parameters():
                 if p.grad is not None:
-                    p.grad.div_(window_count)
+                    p.grad.div_(sample_count)
         if max_grad_norm is not None:
             if scaler is not None and use_amp:
                 scaler.unscale_(optimizer)
@@ -340,15 +342,21 @@ def train_one_epoch(
             out = model(xb)
             loss = loss_fn(out, yb)
 
+        batch_size = yb.size(0)
+        # Scale the mean loss back to a sum so the accumulated gradients can
+        # be divided by ``samples_in_window`` at flush time.
+        scaled_loss = loss * batch_size
         if scaler is not None and use_amp:
-            scaler.scale(loss).backward()
+            scaler.scale(scaled_loss).backward()
         else:
-            loss.backward()
+            scaled_loss.backward()
         microbatches_in_window += 1
+        samples_in_window += batch_size
 
         if (step + 1) % accumulation_steps == 0:
-            _flush_gradients(microbatches_in_window)
+            _flush_gradients(samples_in_window)
             microbatches_in_window = 0
+            samples_in_window = 0
 
         total_loss += loss.item()
         num_batches += 1
@@ -356,7 +364,7 @@ def train_one_epoch(
 
     # Flush any gradients from a partial final accumulation window.
     if microbatches_in_window > 0:
-        _flush_gradients(microbatches_in_window)
+        _flush_gradients(samples_in_window)
 
     return total_loss / num_batches if num_batches > 0 else 0.0
 
@@ -512,15 +520,18 @@ def train_one_epoch_multitask(
     task_weights = task_weights or {}
     accumulation_steps = max(1, accumulation_steps)
     microbatches_in_window = 0  # actual micro-batches accumulated since last step
+    samples_in_window = 0       # total samples whose loss was accumulated
     amp_device_type = _amp_device_type(device)
 
-    def _flush_gradients(window_count):
-        # Average accumulated gradients over the actual window size so a
-        # partial trailing window stays correctly scaled.
-        if window_count > 1:
+    def _flush_gradients(sample_count):
+        # Normalize accumulated gradients by the total number of contributing
+        # samples in the window.  Per-task losses are computed as sums (see
+        # below) so dividing by ``sample_count`` yields a sample-weighted
+        # average that is invariant to both batch size and per-task subset size.
+        if sample_count > 1:
             for p in model.parameters():
                 if p.grad is not None:
-                    p.grad.div_(window_count)
+                    p.grad.div_(sample_count)
         if max_grad_norm is not None:
             if scaler is not None and use_amp:
                 scaler.unscale_(optimizer)
@@ -559,6 +570,7 @@ def train_one_epoch_multitask(
         with torch.amp.autocast(device_type=amp_device_type, enabled=use_amp):
             logits_all = model(xb, head_names=active_tasks)
             loss_total = None
+            micro_samples = 0
             for task in active_tasks:
                 idx = torch.tensor(per_task_idx[task], device=device, dtype=torch.long)
                 logits = logits_all[task].index_select(0, idx)
@@ -567,8 +579,14 @@ def train_one_epoch_multitask(
                 if lfn is None:
                     continue
                 weight = float(task_weights.get(task, 1.0))
-                l = lfn(logits, targets) * weight
+                subset_size = idx.numel()
+                # Multiply by subset_size to convert the head's mean-reduced
+                # loss back into a sum.  Combined with the sample-weighted
+                # flush below, each sample contributes equally regardless of
+                # how it splits across heads or batches.
+                l = lfn(logits, targets) * weight * subset_size
                 loss_total = l if loss_total is None else loss_total + l
+                micro_samples += subset_size
 
             if loss_total is None:
                 continue
@@ -578,18 +596,22 @@ def train_one_epoch_multitask(
         else:
             loss_total.backward()
         microbatches_in_window += 1
+        samples_in_window += micro_samples
 
         if (step + 1) % accumulation_steps == 0:
-            _flush_gradients(microbatches_in_window)
+            _flush_gradients(samples_in_window)
             microbatches_in_window = 0
+            samples_in_window = 0
 
-        total_loss += loss_total.item()
+        # Report an average per-sample loss for progress/logging (the stored
+        # ``loss_total`` is a sum, so normalize it here).
+        total_loss += (loss_total.item() / max(1, micro_samples))
         num_batches += 1
         pbar.set_postfix(loss=f"{total_loss / max(1, num_batches):.4f}")
 
     # Flush any gradients from a partial final accumulation window.
     if microbatches_in_window > 0:
-        _flush_gradients(microbatches_in_window)
+        _flush_gradients(samples_in_window)
 
     return total_loss / num_batches if num_batches > 0 else 0.0
 

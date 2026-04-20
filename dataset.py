@@ -136,6 +136,12 @@ def _generate_fulou_negatives(kyoku_log, discard_index, hands):
             return
         break  # only inspect the immediate next event
 
+    # StateEncoderV2.encode(idx) returns state *before* kyoku_log[idx], so
+    # use ``discard_index + 1`` here to make the encoded state include the
+    # triggering discard (river/last-discard features).  Positive fulou
+    # samples are emitted at the fulou event index — which is typically
+    # ``discard_index + 1`` — and therefore see the same state.
+    encode_index = discard_index + 1
     for seat in range(4):
         if seat == discarder or seat == called_by:
             continue
@@ -144,7 +150,7 @@ def _generate_fulou_negatives(kyoku_log, discard_index, hands):
         pon_ok = can_pon(hands[seat], tile_37)
         kan_ok = can_daiminkan(hands[seat], tile_37)
         if kan_ok or pon_ok or chi_ok:
-            yield (kyoku_log, discard_index, seat, "fulou", 0)
+            yield (kyoku_log, encode_index, seat, "fulou", 0)
 
 
 def _has_kakan_option(hand37, pon_tiles):
@@ -198,13 +204,9 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
             raw = move["dapai"]["p"]
             tile_str = raw.replace("*", "").replace("_", "")
             if tile_str not in FEATURE_TILE_MAP:
-                # Skip unknown tile but still update state so subsequent moves
-                # are not reconstructed from a stale position.
-                if collect_all_actions:
-                    t = FEATURE_TILE_MAP.get(tile_str)
-                    if t is not None:
-                        hands[p_id][t] = max(0, hands[p_id][t] - 1)
-                        rivers[p_id].append(t)
+                # Unknown tile string — skip emitting samples for this move.
+                # The hand counter will drift slightly but ankan/daiminkan
+                # feasibility checks tolerate that.
                 continue
             tile_id_37 = FEATURE_TILE_MAP[tile_str]
             label = _process_single_number(tile_id_37)
