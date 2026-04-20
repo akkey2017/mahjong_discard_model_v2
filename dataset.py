@@ -289,6 +289,12 @@ def _extract_samples_from_kyoku(kyoku_log, collect_all_actions=False,
                             hands[p_id][t] = max(0, hands[p_id][t] - 1)
 
         elif collect_all_actions and "hule" in move:
+            # NOTE: we currently only emit positive ``hule`` samples (label=1).
+            # The training loop sets the ``hule`` task weight to 0 by default
+            # so the 2-class head is not pushed toward "always win"; negative
+            # samples (when a player *could* have declared ron/tsumo but did
+            # not) require ron/tenpai-from-opponent-discard detection and are
+            # out of scope for this change.
             p_id = move["hule"]["l"]
             yield (kyoku_log, i, p_id, "hule", 1)
 

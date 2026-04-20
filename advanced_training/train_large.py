@@ -10,8 +10,9 @@ Outputs go into a self-contained per-run directory::
         best_model.pth
         last_model.pth
 
-Multi-task variants ('*_multitask_large') train discard + riichi + chi/pon/kan
-+ agari heads jointly, using task-masked losses.
+Multi-task variants ('*_multitask_large') train the ``dapai``, ``riichi``,
+``fulou``, ``gang``, and ``hule`` heads jointly, using task-masked losses.
+``fulou`` covers chi/pon/daiminkan calls; ``gang`` covers ankan/kakan.
 """
 
 import argparse
@@ -63,7 +64,9 @@ def parse_args():
     parser.add_argument("--split-by-game", action="store_true",
                         help="Split train/val by game file rather than sample.")
     parser.add_argument("--fulou-negatives", action="store_true",
-                        help="Synthesize chi/pon/kan pass negative samples.")
+                        help="Synthesize fulou-head pass (label 0) negatives for "
+                             "players who could have called chi/pon/daiminkan on "
+                             "a discard but chose not to.")
 
     # Model
     parser.add_argument("--model", choices=sorted(MODEL_FACTORIES.keys()),
@@ -146,8 +149,14 @@ def _build_loss(args, is_multitask):
             "hule":   nn.CrossEntropyLoss(),
             "_default": nn.CrossEntropyLoss(),
         }
+        # ``hule`` is weighted 0 because the dataset only supplies positive
+        # (label=1) samples — see ``_extract_samples_from_kyoku`` in
+        # ``dataset.py``.  Training a 2-class head on positives alone would
+        # collapse the decision to "always win"; negatives require
+        # ron/tenpai detection that is out of scope for this change.  Once
+        # negatives are added the weight should be restored (e.g. 0.5).
         task_weights = {"dapai": 1.0, "riichi": 0.5, "fulou": 0.4,
-                        "gang": 0.3, "hule": 0.5}
+                        "gang": 0.3, "hule": 0.0}
         return loss_fns, task_weights
     return nn.CrossEntropyLoss(label_smoothing=args.label_smoothing), None
 
