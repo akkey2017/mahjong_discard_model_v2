@@ -1,11 +1,13 @@
 """
 Evaluation script for large mahjong discard prediction models.
 
-This script evaluates trained large models (CoAtNet Large, ResNet Large, ViT Large)
-on a validation dataset using multi-ZIP support and provides inference examples.
+Loads a checkpoint saved by :mod:`advanced_training.train_large` (rich dict
+with architecture info), reports per-tile accuracy + a confusion summary, and
+optionally runs an inference demo.
 """
 
 import argparse
+import csv
 import os
 import re
 from pathlib import Path
@@ -22,13 +24,20 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from dataset import create_dataloaders  # noqa: E402
-from utils import TopKAccuracy, evaluate  # noqa: E402
-from advanced_training.large_models import MODEL_FACTORIES  # noqa: E402
+from dataset import (  # noqa: E402
+    create_dataloaders,
+    create_multitask_dataloaders,
+)
+from utils import (  # noqa: E402
+    TopKAccuracy,
+    evaluate,
+    evaluate_multitask,
+    load_checkpoint,
+)
+from advanced_training.large_models import MODEL_FACTORIES, MULTITASK_MODELS  # noqa: E402
 from advanced_training.multizip_dataset import MultiZipMahjongDataset  # noqa: E402
 
 
-# Tile ID to tile string mapping (34-dimensional)
 ID_TO_TILE_34 = {
     **{i - 1: f"m{i}" for i in range(1, 10)},
     **{i - 1 + 9: f"p{i}" for i in range(1, 10)},
@@ -38,314 +47,298 @@ ID_TO_TILE_34 = {
 
 
 def infer_model_type_from_path(model_path):
-    """
-    Infer model type from the model file path.
-
-    Looks for architecture names (coatnet_large, resnet_large, vit_large) in the
-    filename, treating common separators (_, -, .) as word boundaries.
-
-    Args:
-        model_path: Path to the model file
-
-    Returns:
-        Inferred model type ('coatnet_large', 'resnet_large', 'vit_large') or None
-    """
+    """Fallback heuristic: guess model type from filename words."""
     filename = os.path.basename(model_path).lower()
-
-    # Split on common separators (underscore, hyphen, dot) to get words
     words = re.split(r"[_.-]", filename)
-
-    # Check for combinations indicating large models
     has_large = "large" in words
+    has_multitask = "multitask" in words
 
-    if has_large:
+    def _base():
         if "vit" in words:
-            return "vit_large"
-        elif "resnet" in words:
-            return "resnet_large"
-        elif "coatnet" in words:
-            return "coatnet_large"
+            return "vit"
+        if "resnet" in words:
+            return "resnet"
+        if "coatnet" in words:
+            return "coatnet"
+        return None
 
-    # Fallback: check for architecture names even without "large"
-    if "vit" in words:
-        return "vit_large"
-    elif "resnet" in words:
-        return "resnet_large"
-    elif "coatnet" in words:
-        return "coatnet_large"
-
-    return None
+    base = _base()
+    if base is None:
+        return None
+    if has_multitask:
+        return f"{base}_multitask_large"
+    if has_large:
+        return f"{base}_large"
+    return f"{base}_large"
 
 
 def parse_args():
-    """Parse command line arguments."""
-    parser = argparse.ArgumentParser(
-        description="Evaluate large mahjong discard prediction models"
-    )
-
-    parser.add_argument(
-        "--model-path",
-        type=str,
-        default="large_discard_model_coatnet_large.pth",
-        help="Path to trained model weights",
-    )
-    parser.add_argument(
-        "--model-type",
-        type=str,
-        default=None,
-        choices=sorted(MODEL_FACTORIES.keys()),
-        help="Model architecture type (auto-detected from filename if not specified)",
-    )
-    parser.add_argument(
-        "--data",
-        nargs="+",
-        required=True,
-        help="Path(s) to evaluation data ZIP file(s)",
-    )
-    parser.add_argument(
-        "--max-files-per-zip",
-        type=int,
-        default=200,
-        help="Maximum number of game files to load from each ZIP",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=64,
-        help="Batch size for evaluation",
-    )
-    parser.add_argument(
-        "--num-workers",
-        type=int,
-        default=2,
-        help="Number of data loading workers",
-    )
-    parser.add_argument(
-        "--device",
-        type=str,
-        default="auto",
-        help="Device to use (auto/cuda/cpu)",
-    )
-    parser.add_argument(
-        "--show-demo",
-        action="store_true",
-        help="Show inference demo on sample data",
-    )
-    parser.add_argument(
-        "--num-demo-samples",
-        type=int,
-        default=5,
-        help="Number of samples to show in demo",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=42,
-        help="Random seed for reproducible splits",
-    )
-    parser.add_argument(
-        "--train-ratio",
-        type=float,
-        default=0.9,
-        help="Ratio of data used for training (validation uses the rest)",
-    )
-
+    parser = argparse.ArgumentParser(description="Evaluate large mahjong models.")
+    parser.add_argument("--model-path", type=str, required=True,
+                        help="Path to a checkpoint (run_dir/best_model.pth or legacy .pth).")
+    parser.add_argument("--model-type", type=str, default=None,
+                        choices=sorted(MODEL_FACTORIES.keys()),
+                        help="Override architecture (otherwise auto-detected from checkpoint).")
+    parser.add_argument("--data", nargs="+", required=True)
+    parser.add_argument("--max-files-per-zip", type=int, default=200)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--device", type=str, default="auto")
+    parser.add_argument("--show-demo", action="store_true")
+    parser.add_argument("--num-demo-samples", type=int, default=5)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--train-ratio", type=float, default=0.9)
+    parser.add_argument("--output-csv", type=str, default=None,
+                        help="Write per-tile accuracy table to this CSV file.")
+    parser.add_argument("--split-by-game", action="store_true")
     return parser.parse_args()
 
 
-def run_inference_demo(model, val_set, device, num_samples=5):
-    """
-    Run inference demo on sample data.
+def _resolve_model_type(args, payload):
+    """Pick the model type from (--model-type) > checkpoint > filename heuristic."""
+    if args.model_type:
+        return args.model_type
+    saved = payload.get("model_type")
+    if saved and saved in MODEL_FACTORIES:
+        print(f"Using model_type from checkpoint: {saved}")
+        return saved
+    guess = infer_model_type_from_path(args.model_path)
+    if guess in MODEL_FACTORIES:
+        print(f"Guessed model_type from filename: {guess}")
+        return guess
+    raise ValueError(
+        "Could not determine model type. Pass --model-type explicitly."
+    )
 
-    Args:
-        model: Trained model
-        val_set: Validation dataset
-        device: Device to run on
-        num_samples: Number of samples to demonstrate
-    """
+
+def _run_demo(model, val_set, device, num_samples):
     print("\n" + "=" * 60)
     print("Inference Demo")
     print("=" * 60 + "\n")
-
     model.eval()
-
     for i in range(min(num_samples, len(val_set))):
         sample_idx = torch.randint(0, len(val_set), (1,)).item()
-        xb_sample, yb_sample, _ = val_set[sample_idx]
-
+        xb_sample, yb_sample, action = val_set[sample_idx]
+        if action != "dapai":
+            continue
         with torch.no_grad():
-            # Add batch dimension and predict
-            out_sample = model(xb_sample.unsqueeze(0).to(device))
-
-            # Convert to probabilities
-            probabilities = F.softmax(out_sample, dim=1)
-            top5_probs, top5_indices = torch.topk(probabilities, 5)
-
-        actual_discard = ID_TO_TILE_34.get(yb_sample.item(), "Unknown")
-        print(f"Sample {i + 1} (Index: {sample_idx})")
-        print(f"Actual discard: {actual_discard}")
-        print("Model predictions (Top 5):")
-
+            out = model(xb_sample.unsqueeze(0).to(device))
+            if isinstance(out, dict):
+                out = out["dapai"]
+            probs = F.softmax(out, dim=1)
+            top5_probs, top5_idx = torch.topk(probs, 5)
+        actual = ID_TO_TILE_34.get(yb_sample.item() if torch.is_tensor(yb_sample) else yb_sample, "?")
+        print(f"Sample {i + 1} actual: {actual}")
         for j in range(5):
-            pred_tile = ID_TO_TILE_34.get(top5_indices[0, j].item(), "Unknown")
-            prob = top5_probs[0, j].item()
-            marker = "✓" if top5_indices[0, j].item() == yb_sample.item() else " "
-            print(f"  {marker} {j + 1}. {pred_tile:<4} ({prob:.2%})")
-
+            t = ID_TO_TILE_34.get(top5_idx[0, j].item(), "?")
+            p = top5_probs[0, j].item()
+            marker = "*" if top5_idx[0, j].item() == (yb_sample.item() if torch.is_tensor(yb_sample) else yb_sample) else " "
+            print(f"  {marker} {j + 1}. {t:<4} ({p:.2%})")
         print()
 
 
-def main():
-    """Main evaluation function."""
-    args = parse_args()
+@torch.no_grad()
+def _compute_per_tile_stats(model, val_loader, device, num_classes=34, is_multitask=False):
+    """Return (per_tile_correct, per_tile_total, confusion[NxN])."""
+    confusion = torch.zeros(num_classes, num_classes, dtype=torch.long)
+    model.eval()
+    pbar = tqdm(val_loader, desc="Per-tile", leave=False, file=sys.stderr,
+                dynamic_ncols=True, mininterval=0.1)
+    for batch in pbar:
+        if is_multitask:
+            xb, yb, actions = batch
+            if isinstance(actions, torch.Tensor):
+                actions = [str(a) for a in actions.tolist()]
+            # restrict to dapai (discard) samples
+            idx = [i for i, a in enumerate(actions) if a == "dapai"]
+            if not idx:
+                continue
+            xb = xb[idx].to(device)
+            yb = yb[idx].to(device)
+        else:
+            xb, yb, _ = batch
+            xb = xb.to(device)
+            yb = yb.to(device)
 
-    # Determine device
-    if args.device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    else:
-        device = args.device
+        logits = model(xb)
+        if isinstance(logits, dict):
+            logits = logits["dapai"]
+        preds = logits.argmax(dim=-1)
+        for gt, pr in zip(yb.tolist(), preds.tolist()):
+            if 0 <= gt < num_classes and 0 <= pr < num_classes:
+                confusion[gt, pr] += 1
+
+    per_tile_total = confusion.sum(dim=1)
+    per_tile_correct = confusion.diag()
+    return per_tile_correct, per_tile_total, confusion
+
+
+def _print_per_tile_table(per_correct, per_total, output_csv=None):
+    print("\n" + "=" * 60)
+    print("Per-tile accuracy (discard head)")
+    print("=" * 60)
+    print(f"{'tile':<6} {'acc':>8} {'correct':>10} {'total':>8}")
+    rows = []
+    for i in range(len(per_correct)):
+        total = int(per_total[i])
+        correct = int(per_correct[i])
+        acc = correct / total if total else 0.0
+        tile = ID_TO_TILE_34[i]
+        rows.append({"tile": tile, "accuracy": f"{acc:.4f}",
+                     "correct": correct, "total": total})
+        print(f"{tile:<6} {acc:>8.4f} {correct:>10d} {total:>8d}")
+    # Category rollup
+    def _range_acc(ids):
+        c = sum(int(per_correct[i]) for i in ids)
+        t = sum(int(per_total[i]) for i in ids)
+        return c / t if t else 0.0, c, t
+    m_acc, m_c, m_t = _range_acc(range(0, 9))
+    p_acc, p_c, p_t = _range_acc(range(9, 18))
+    s_acc, s_c, s_t = _range_acc(range(18, 27))
+    z_acc, z_c, z_t = _range_acc(range(27, 34))
+    print("-" * 40)
+    print(f"{'manzu':<6} {m_acc:>8.4f} {m_c:>10d} {m_t:>8d}")
+    print(f"{'pinzu':<6} {p_acc:>8.4f} {p_c:>10d} {p_t:>8d}")
+    print(f"{'souzu':<6} {s_acc:>8.4f} {s_c:>10d} {s_t:>8d}")
+    print(f"{'honor':<6} {z_acc:>8.4f} {z_c:>10d} {z_t:>8d}")
+
+    if output_csv:
+        with open(output_csv, "w", newline="") as f:
+            w = csv.DictWriter(f, fieldnames=["tile", "accuracy", "correct", "total"])
+            w.writeheader()
+            w.writerows(rows)
+        print(f"\nPer-tile CSV written to {output_csv}")
+
+
+def _print_confusion_summary(confusion, top_k_errors=15):
+    """Print the top confused (gt, pred) pairs."""
+    print("\n" + "=" * 60)
+    print(f"Top-{top_k_errors} confused (ground truth -> predicted) pairs")
+    print("=" * 60)
+    n = confusion.size(0)
+    pairs = []
+    for i in range(n):
+        for j in range(n):
+            if i == j:
+                continue
+            c = int(confusion[i, j])
+            if c > 0:
+                pairs.append((c, i, j))
+    pairs.sort(reverse=True)
+    for count, gt, pr in pairs[:top_k_errors]:
+        print(f"  {ID_TO_TILE_34[gt]:<4} -> {ID_TO_TILE_34[pr]:<4} : {count}")
+
+
+def main():
+    args = parse_args()
+    device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
     print(f"Using device: {device}")
 
-    # Determine model type
-    if args.model_type is not None:
-        model_type = args.model_type
-    else:
-        model_type = infer_model_type_from_path(args.model_path)
-        if model_type is None:
-            model_type = "coatnet_large"  # Default fallback
-            print(f"⚠️  Could not infer model type from filename, defaulting to '{model_type}'")
-        else:
-            print(f"🔍 Auto-detected model type: {model_type}")
+    # ---- Load checkpoint ----
+    if not Path(args.model_path).exists():
+        raise FileNotFoundError(f"Model file not found: {args.model_path}")
+    payload = load_checkpoint(args.model_path, map_location=device)
+    model_type = _resolve_model_type(args, payload)
+    is_multitask = model_type in MULTITASK_MODELS
 
-    print("\n" + "=" * 60)
-    print("Evaluation Configuration")
-    print("=" * 60)
-    print(f"{'model_path':20s}: {args.model_path}")
-    print(f"{'model_type':20s}: {model_type}")
-    print(f"{'data':20s}: {args.data}")
-    print(f"{'max_files_per_zip':20s}: {args.max_files_per_zip}")
-    print(f"{'batch_size':20s}: {args.batch_size}")
-    print(f"{'num_workers':20s}: {args.num_workers}")
-    print(f"{'device':20s}: {device}")
-    print(f"{'show_demo':20s}: {args.show_demo}")
-    print(f"{'num_demo_samples':20s}: {args.num_demo_samples}")
-    print(f"{'seed':20s}: {args.seed}")
-    print(f"{'train_ratio':20s}: {args.train_ratio}")
-    print("=" * 60 + "\n")
-
-    # Create model
-    print(f"Creating {model_type.upper().replace('_', ' ')} model...")
-    if model_type not in MODEL_FACTORIES:
-        raise ValueError(
-            f"Unknown model type: {model_type}. "
-            f"Available: {list(MODEL_FACTORIES.keys())}"
-        )
-    model = MODEL_FACTORIES[model_type](dropout=0.0)  # No dropout during evaluation
-
-    # Load trained weights
+    print(f"Model type: {model_type} (multitask={is_multitask})")
+    model = MODEL_FACTORIES[model_type](dropout=0.0)
     try:
-        state_dict = torch.load(args.model_path, map_location=device, weights_only=True)
-        model.load_state_dict(state_dict)
-        print(f"✅ Successfully loaded model weights from '{args.model_path}'")
-    except FileNotFoundError:
-        print(f"❌ Error: Model file '{args.model_path}' not found")
-        return
+        model.load_state_dict(payload["model_state"])
     except RuntimeError as e:
-        print(f"❌ Error loading model weights: {e}")
-        print("   This may be due to a model architecture mismatch.")
-        print(f"   Please verify the --model-type ({model_type}) matches the saved weights.")
-        return
-    except Exception as e:
-        print(f"❌ Error loading model: {e}")
-        return
-
-    model.to(device)
-    model.eval()
-
-    # Load evaluation dataset
-    print(f"\n📂 Loading evaluation dataset from:")
-    for path in args.data:
-        print(f"   - {path}")
-
-    try:
-        full_dataset = MultiZipMahjongDataset(
-            zip_paths=args.data,
-            max_files_per_zip=args.max_files_per_zip,
-            verbose=True,
+        raise RuntimeError(
+            f"Failed to load weights into {model_type}. "
+            f"Verify that the checkpoint matches this architecture.\n{e}"
         )
-    except FileNotFoundError as e:
-        print(f"❌ Error: {e}")
-        return
-    except Exception as e:
-        print(f"❌ Error loading dataset: {e}")
-        return
+    model.to(device).eval()
 
+    # ---- Dataset ----
+    full_dataset = MultiZipMahjongDataset(
+        zip_paths=args.data,
+        max_files_per_zip=args.max_files_per_zip,
+        verbose=True,
+        collect_all_actions=is_multitask,
+    )
     stats = full_dataset.get_statistics()
     print(f"Combined samples: {len(full_dataset)}")
     print(f"Per-archive counts: {stats.get('source_counts', {})}")
+    print(f"Action counts: {stats.get('action_counts', {})}")
 
-    discard_dataset = full_dataset.filter_by_action("discard")
-
-    if len(discard_dataset) == 0:
-        print("❌ Error: No discard samples found in evaluation dataset!")
-        return
-
-    print(f"📊 Loaded {len(discard_dataset)} discard samples")
-
-    # Create data loaders
-    _, val_loader = create_dataloaders(
-        discard_dataset,
-        train_ratio=args.train_ratio,
-        batch_size=args.batch_size,
-        num_workers=args.num_workers,
-        seed=args.seed,
-    )
-
-    # Evaluate model
-    print("\n🔍 Evaluating model...")
-    loss_fn = nn.CrossEntropyLoss()
-    top1_acc = TopKAccuracy(k=1)
-    top3_acc = TopKAccuracy(k=3)
-    top5_acc = TopKAccuracy(k=5)
-
-    val_metrics = evaluate(
-        model,
-        val_loader,
-        loss_fn,
-        device,
-        metrics={"top1_acc": top1_acc, "top3_acc": top3_acc, "top5_acc": top5_acc},
-    )
-
-    # Display results
-    print("\n" + "=" * 60)
-    print("Evaluation Results")
-    print("=" * 60)
-    print(f"Average Loss:     {val_metrics['loss']:.4f}")
-    print(
-        f"Top-1 Accuracy:   {val_metrics['top1_acc']:.4f} "
-        f"({top1_acc.correct}/{top1_acc.total})"
-    )
-    print(
-        f"Top-3 Accuracy:   {val_metrics['top3_acc']:.4f} "
-        f"({top3_acc.correct}/{top3_acc.total})"
-    )
-    print(
-        f"Top-5 Accuracy:   {val_metrics['top5_acc']:.4f} "
-        f"({top5_acc.correct}/{top5_acc.total})"
-    )
-    print("=" * 60 + "\n")
-
-    # Show inference demo
-    if args.show_demo:
-        # Get validation set for demo
-        generator = torch.Generator().manual_seed(args.seed)
-        train_size = int(len(discard_dataset) * args.train_ratio)
-        val_size = len(discard_dataset) - train_size
-        _, val_set = random_split(
-            discard_dataset, [train_size, val_size], generator=generator
+    if is_multitask:
+        _, val_loader = create_multitask_dataloaders(
+            full_dataset,
+            train_ratio=args.train_ratio,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            seed=args.seed,
+            split_by_game=args.split_by_game,
+        )
+    else:
+        discard_dataset = full_dataset.filter_by_action("dapai")
+        if len(discard_dataset) == 0:
+            raise RuntimeError("No dapai samples found in evaluation data.")
+        _, val_loader = create_dataloaders(
+            discard_dataset,
+            train_ratio=args.train_ratio,
+            batch_size=args.batch_size,
+            num_workers=args.num_workers,
+            seed=args.seed,
+            split_by_game=args.split_by_game,
         )
 
-        run_inference_demo(model, val_set, device, args.num_demo_samples)
+    # ---- Aggregate metrics ----
+    loss_fn = nn.CrossEntropyLoss()
+    top1 = TopKAccuracy(k=1)
+    top3 = TopKAccuracy(k=3)
+    top5 = TopKAccuracy(k=5)
+
+    if is_multitask:
+        loss_fns = {
+            k: nn.CrossEntropyLoss()
+            for k in ["dapai", "riichi", "fulou", "gang", "hule"]
+        }
+        loss_fns["_default"] = nn.CrossEntropyLoss()
+        results = evaluate_multitask(model, val_loader, loss_fns, device)
+        print("\n" + "=" * 60)
+        print("Multi-task results")
+        print("=" * 60)
+        for k, v in sorted(results.items()):
+            if isinstance(v, float):
+                print(f"{k:<20s}: {v:.4f}")
+            else:
+                print(f"{k:<20s}: {v}")
+    else:
+        results = evaluate(
+            model, val_loader, loss_fn, device,
+            metrics={"top1_acc": top1, "top3_acc": top3, "top5_acc": top5},
+        )
+        print("\n" + "=" * 60)
+        print("Results")
+        print("=" * 60)
+        print(f"Loss:           {results['loss']:.4f}")
+        print(f"Top-1 Accuracy: {results['top1_acc']:.4f} "
+              f"({top1.correct}/{top1.total})")
+        print(f"Top-3 Accuracy: {results['top3_acc']:.4f} "
+              f"({top3.correct}/{top3.total})")
+        print(f"Top-5 Accuracy: {results['top5_acc']:.4f} "
+              f"({top5.correct}/{top5.total})")
+
+    # ---- Per-tile + confusion (always computed for discard head) ----
+    per_correct, per_total, confusion = _compute_per_tile_stats(
+        model, val_loader, device, is_multitask=is_multitask,
+    )
+    _print_per_tile_table(per_correct, per_total, output_csv=args.output_csv)
+    _print_confusion_summary(confusion)
+
+    # ---- Optional demo ----
+    if args.show_demo:
+        # Need a plain val Subset for demo; reuse val_loader's dataset
+        generator = torch.Generator().manual_seed(args.seed)
+        base = full_dataset.filter_by_action("dapai") if not is_multitask else full_dataset
+        train_size = int(len(base) * args.train_ratio)
+        val_size = len(base) - train_size
+        _, val_set = random_split(base, [train_size, val_size], generator=generator)
+        _run_demo(model, val_set, device, args.num_demo_samples)
 
 
 if __name__ == "__main__":

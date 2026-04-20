@@ -66,6 +66,15 @@ mahjong_discard_model_v2/
 - ✅ **一人麻雀シミュレーション**: AIの打牌判断をリアルタイムで観察
 - ✅ 🆕 **シーケンスモデル**: 一局の流れを学習するLSTM/Transformerモデル
 
+## 📦 動作環境 / Requirements
+
+- Python 3.9+
+- **PyTorch 2.0 以上** が必須です。
+  - `advanced_training/` は `torch.nn.functional.scaled_dot_product_attention`
+    (ViT) と `torch.load(..., weights_only=True)` (チェックポイント読み込み)
+    を利用しており、どちらも PyTorch 2.0 で導入された API です。
+- `tqdm`, `numpy`
+
 ## 🚀 使い方
 
 ### 1. トレーニング
