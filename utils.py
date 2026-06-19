@@ -455,7 +455,7 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def print_model_summary(model, input_shape=(1, 380, 4, 9)):
+def print_model_summary(model, input_shape=(1, 380, 4, 9), raise_on_error=False):
     """
     Print a summary of the model architecture.
 
@@ -481,6 +481,8 @@ def print_model_summary(model, input_shape=(1, 380, 4, 9)):
             print(f"Output shape: {tuple(output.shape)}")
     except Exception as e:
         print(f"Could not determine output shape: {e}")
+        if raise_on_error:
+            raise
 
     print(f"{'='*60}\n")
 
@@ -496,7 +498,11 @@ class ModelEMA:
     def __init__(self, model, decay=0.9999):
         import copy
         self.decay = decay
-        self.ema = copy.deepcopy(model).eval()
+        # Keep EMA independent from torch.compile's OptimizedModule wrapper.
+        # The wrapper is an execution detail and is not guaranteed to deepcopy
+        # cleanly or expose the same parameter-name prefix across versions.
+        source_model = getattr(model, "_orig_mod", model)
+        self.ema = copy.deepcopy(source_model).eval()
         for p in self.ema.parameters():
             p.requires_grad_(False)
 
@@ -506,7 +512,8 @@ class ModelEMA:
         # running_mean / running_var / num_batches_tracked) already maintain
         # their own running statistics and should be copied verbatim — EMA
         # averaging would distort those statistics and hurt evaluation.
-        model_params = dict(model.named_parameters())
+        source_model = getattr(model, "_orig_mod", model)
+        model_params = dict(source_model.named_parameters())
         for k, v in self.ema.named_parameters():
             src = model_params[k].detach()
             if v.dtype.is_floating_point:
@@ -514,7 +521,7 @@ class ModelEMA:
             else:
                 v.copy_(src)
 
-        model_buffers = dict(model.named_buffers())
+        model_buffers = dict(source_model.named_buffers())
         for k, v in self.ema.named_buffers():
             v.copy_(model_buffers[k].detach())
 
@@ -554,6 +561,7 @@ def train_one_epoch_multitask(
     samples_in_window = 0       # total samples whose loss was accumulated
     amp_device_type = _amp_device_type(device)
     autocast_dtype = resolve_amp_dtype(device, amp_dtype)
+    model_heads = getattr(model, "_orig_mod", model).heads
 
     def _flush_gradients(sample_count):
         # Normalize accumulated gradients by the total number of contributing
@@ -595,7 +603,7 @@ def train_one_epoch_multitask(
         for i, a in enumerate(actions):
             per_task_idx.setdefault(a, []).append(i)
 
-        active_tasks = [t for t in per_task_idx if t in model.heads]
+        active_tasks = [t for t in per_task_idx if t in model_heads]
         if not active_tasks:
             continue
 
@@ -664,6 +672,7 @@ def evaluate_multitask(
     task_weights = task_weights or {}
     amp_device_type = _amp_device_type(device)
     autocast_dtype = resolve_amp_dtype(device, amp_dtype)
+    model_heads = getattr(model, "_orig_mod", model).heads
 
     per_task_correct = {}
     per_task_total = {}
@@ -683,7 +692,7 @@ def evaluate_multitask(
             for i, a in enumerate(actions):
                 per_task_idx.setdefault(a, []).append(i)
 
-            active_tasks = [t for t in per_task_idx if t in model.heads]
+            active_tasks = [t for t in per_task_idx if t in model_heads]
             if not active_tasks:
                 continue
 
@@ -709,8 +718,14 @@ def evaluate_multitask(
                     per_task_total[task] = per_task_total.get(task, 0) + n
 
     results = {}
-    total_samples = sum(per_task_total.values()) or 1
-    overall_correct = sum(per_task_correct.values())
+    # A disabled head (notably hule with weight=0 until negative examples are
+    # available) must not affect the metric used for checkpoint selection.
+    monitored_tasks = {
+        task for task in per_task_total
+        if float(task_weights.get(task, 1.0)) > 0.0
+    }
+    total_samples = sum(per_task_total[t] for t in monitored_tasks) or 1
+    overall_correct = sum(per_task_correct.get(t, 0) for t in monitored_tasks)
     results["top1_acc"] = overall_correct / total_samples
     for task, total in per_task_total.items():
         acc = per_task_correct[task] / total if total else 0.0
@@ -719,6 +734,7 @@ def evaluate_multitask(
         results[f"{task}_acc"] = acc
         results[f"{task}_loss"] = avg_loss
         results[f"{task}_total"] = total
-    overall_loss_samples = sum(per_task_loss_samples.values())
-    results["loss"] = (sum(per_task_loss_sum.values()) / overall_loss_samples) if overall_loss_samples else 0.0
+    overall_loss_samples = sum(per_task_loss_samples.get(t, 0) for t in monitored_tasks)
+    weighted_loss_sum = sum(per_task_loss_sum.get(t, 0.0) for t in monitored_tasks)
+    results["loss"] = (weighted_loss_sum / overall_loss_samples) if overall_loss_samples else 0.0
     return results

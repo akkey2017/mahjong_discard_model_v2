@@ -44,7 +44,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from mahjong_ai_features import StateEncoderV2, FEATURE_TILE_MAP  # noqa: E402
+from mahjong_ai_features import (  # noqa: E402
+    FEATURE_SCHEMA_VERSION,
+    FEATURE_TILE_MAP,
+    StateEncoderV2,
+)
 from mahjong_rules import (  # noqa: E402
     can_ankan,
     can_chi,
@@ -71,6 +75,13 @@ class MahjongAgent:
                  model_type_override: Optional[str] = None):
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         payload = load_checkpoint(checkpoint_path, map_location=self.device)
+        saved_schema = payload.get("config", {}).get("feature_schema_version")
+        if saved_schema != FEATURE_SCHEMA_VERSION:
+            raise RuntimeError(
+                "Checkpoint feature schema is incompatible with the corrected encoder "
+                f"(saved={saved_schema!r}, required={FEATURE_SCHEMA_VERSION!r}). "
+                "Retrain the model before using MahjongAgent."
+            )
         self.model_type = model_type_override or payload.get("model_type")
         if self.model_type not in MODEL_FACTORIES:
             raise ValueError(

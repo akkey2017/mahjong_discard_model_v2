@@ -49,6 +49,7 @@ from utils import (  # noqa: E402
 from advanced_training.experiment import ExperimentLogger  # noqa: E402
 from advanced_training.large_models import MODEL_FACTORIES, MULTITASK_MODELS  # noqa: E402
 from advanced_training.multizip_dataset import MultiZipMahjongDataset  # noqa: E402
+from mahjong_ai_features import FEATURE_SCHEMA_VERSION  # noqa: E402
 
 
 def parse_args():
@@ -118,6 +119,8 @@ def parse_args():
 
     # System
     parser.add_argument("--num-workers", type=int, default=2)
+    parser.add_argument("--val-num-workers", type=int, default=2,
+                        help="Validation DataLoader workers; kept separate to limit RAM use.")
     parser.add_argument("--device", type=str, default="auto")
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--prefetch-factor", type=int, default=4,
@@ -173,6 +176,42 @@ def _resolve_run_dir(args):
     )
 
 
+def _explicit_cli_dests(argv=None):
+    """Return argparse destination names explicitly present on the CLI."""
+    argv = sys.argv[1:] if argv is None else argv
+    explicit = set()
+    for token in argv:
+        if not token.startswith("--"):
+            continue
+        name = token.split("=", 1)[0][2:]
+        if name.startswith("no-"):
+            name = name[3:]
+        explicit.add(name.replace("-", "_"))
+    return explicit
+
+
+def _restore_resume_config(args, saved_config, argv=None):
+    """Restore saved training options unless the current CLI overrides them.
+
+    Paths and the execution device belong to the current invocation. All other
+    training/data options are restored so scheduler construction, dataset
+    sampling and AMP behavior match the original run. ``model`` is always
+    restored because checkpoint weights cannot be loaded into another model.
+    """
+    explicit = _explicit_cli_dests(argv)
+    invocation_only = {"data", "resume", "run_dir", "run_name", "device"}
+    restored = []
+    for key, value in saved_config.items():
+        if key in invocation_only or not hasattr(args, key):
+            continue
+        if key != "model" and key in explicit:
+            continue
+        if getattr(args, key) != value:
+            setattr(args, key, value)
+            restored.append(key)
+    return restored
+
+
 def _build_loss(args, is_multitask):
     if is_multitask:
         # Per-head losses using 牌譜形式 head names; dapai uses label smoothing.
@@ -209,6 +248,44 @@ def _configure_torch_runtime(args, device):
         torch.backends.cudnn.benchmark = args.cudnn_benchmark
 
 
+def _run_device_preflight(model, device, args, exp):
+    """Run a real forward/backward before workers and long training begin."""
+    device_type = _amp_device_type(device)
+    if device_type == "cuda":
+        exp.log(
+            f"CUDA preflight: gpu={torch.cuda.get_device_name(device)} "
+            f"capability={torch.cuda.get_device_capability(device)} "
+            f"torch_arches={torch.cuda.get_arch_list()}"
+        )
+    was_training = model.training
+    model.eval()
+    model.zero_grad(set_to_none=True)
+    try:
+        dummy = torch.randn(1, 380, 4, 9, device=device)
+        with torch.amp.autocast(
+            device_type=device_type,
+            enabled=args.amp,
+            dtype=resolve_amp_dtype(device, args.amp_dtype),
+        ):
+            output = model(dummy)
+            if isinstance(output, dict):
+                probe = sum(value.float().mean() for value in output.values())
+            else:
+                probe = output.float().mean()
+        probe.backward()
+        if device_type == "cuda":
+            torch.cuda.synchronize(device)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Device preflight failed on {device}. Check the PyTorch/CUDA build, "
+            f"GPU architecture support and AMP dtype. Original error: {exc}"
+        ) from exc
+    finally:
+        model.zero_grad(set_to_none=True)
+        model.train(was_training)
+    exp.log("Device preflight: forward/backward OK")
+
+
 def _compile_model_if_requested(model, args, exp):
     if not args.compile:
         return model
@@ -228,20 +305,48 @@ def _checkpoint_module(model):
 def _profile_training_batches(
     model, train_loader, loss_obj, optimizer, device, args, is_multitask, task_weights, scaler, ema, exp
 ):
-    """Run a short train-only benchmark and exit without writing checkpoints."""
+    """Run a bounded streaming benchmark and exit without checkpoints."""
     if args.profile_batches <= 0:
         return
+
+    class _ProfileLoader:
+        def __init__(self, loader, limit):
+            self.loader = loader
+            self.limit = min(limit, len(loader))
+            self.batch_count = 0
+            self.sample_count = 0
+            self.data_seconds = 0.0
+            self.first_batch_seconds = None
+
+        def __len__(self):
+            return self.limit
+
+        def __iter__(self):
+            iterator_start = time.perf_counter()
+            iterator = iter(self.loader)
+            self.data_seconds += time.perf_counter() - iterator_start
+            for _ in range(self.limit):
+                wait_start = time.perf_counter()
+                try:
+                    batch = next(iterator)
+                except StopIteration:
+                    return
+                wait_seconds = time.perf_counter() - wait_start
+                self.data_seconds += wait_seconds
+                if self.first_batch_seconds is None:
+                    self.first_batch_seconds = time.perf_counter() - iterator_start
+                self.batch_count += 1
+                self.sample_count += int(batch[1].numel())
+                yield batch
+
     if _amp_device_type(device) == "cuda":
         torch.cuda.reset_peak_memory_stats(device)
         torch.cuda.synchronize(device)
+    exp.log(
+        f"Profile: streaming {args.profile_batches} batches; progress includes DataLoader wait"
+    )
     start = time.perf_counter()
-    limited_loader = []
-    sample_count = 0
-    for i, batch in enumerate(train_loader):
-        if i >= args.profile_batches:
-            break
-        limited_loader.append(batch)
-        sample_count += int(batch[1].numel())
+    limited_loader = _ProfileLoader(train_loader, args.profile_batches)
 
     if is_multitask:
         train_loss = train_one_epoch_multitask(
@@ -263,9 +368,15 @@ def _profile_training_batches(
     if _amp_device_type(device) == "cuda":
         torch.cuda.synchronize(device)
     elapsed = max(time.perf_counter() - start, 1e-9)
+    compute_seconds = max(0.0, elapsed - limited_loader.data_seconds)
     exp.log(
-        f"Profile: batches={len(limited_loader)}, samples={sample_count}, "
-        f"samples/sec={sample_count / elapsed:.2f}, loss={train_loss:.4f}"
+        f"Profile: batches={limited_loader.batch_count}, samples={limited_loader.sample_count}, "
+        f"samples/sec={limited_loader.sample_count / elapsed:.2f}, loss={train_loss:.4f}"
+    )
+    exp.log(
+        f"Profile timing: first_batch={limited_loader.first_batch_seconds or 0.0:.2f}s, "
+        f"data_wait={limited_loader.data_seconds:.2f}s, "
+        f"compute_and_transfer_estimate={compute_seconds:.2f}s, total={elapsed:.2f}s"
     )
     if _amp_device_type(device) == "cuda":
         peak_gib = torch.cuda.max_memory_allocated(device) / (1024 ** 3)
@@ -275,20 +386,29 @@ def _profile_training_batches(
 
 def main():
     args = parse_args()
-    torch.manual_seed(args.seed)
+    args.feature_schema_version = FEATURE_SCHEMA_VERSION
+    exp, resuming = _resolve_run_dir(args)
+    if resuming:
+        saved_schema = exp.config.get("feature_schema_version")
+        if saved_schema != FEATURE_SCHEMA_VERSION:
+            raise RuntimeError(
+                "This run predates the private-hand/relative-seat feature fix "
+                f"(saved={saved_schema!r}, required={FEATURE_SCHEMA_VERSION!r}). "
+                "Its weights are incompatible with the corrected encoder; start a new run."
+            )
+        restored = _restore_resume_config(args, exp.config)
+        if restored:
+            exp.log(f"Restored saved config: {', '.join(sorted(restored))}")
+        if not exp.last_checkpoint.exists():
+            raise FileNotFoundError(
+                f"Resume checkpoint not found: {exp.last_checkpoint}. "
+                "Pass a run directory containing last_model.pth."
+            )
 
+    torch.manual_seed(args.seed)
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
     _configure_torch_runtime(args, device)
     is_multitask = args.model in MULTITASK_MODELS
-
-    exp, resuming = _resolve_run_dir(args)
-    if resuming:
-        # Override args.model with the resumed config if available
-        resumed_model = exp.config.get("model")
-        if resumed_model and resumed_model != args.model:
-            exp.log(f"Overriding --model with resumed value: {resumed_model}")
-            args.model = resumed_model
-            is_multitask = args.model in MULTITASK_MODELS
 
     exp.log(f"Run directory: {exp.run_dir}")
     exp.log(f"Using device: {device}")
@@ -327,6 +447,7 @@ def main():
             persistent_workers=args.persistent_workers,
             prefetch_factor=args.prefetch_factor,
             drop_last=args.drop_last,
+            val_num_workers=args.val_num_workers,
         )
     else:
         discard_dataset = dataset.filter_by_action("dapai")
@@ -343,12 +464,14 @@ def main():
             persistent_workers=args.persistent_workers,
             prefetch_factor=args.prefetch_factor,
             drop_last=args.drop_last,
+            val_num_workers=args.val_num_workers,
         )
 
     # ---- Model / optimizer / scheduler ----
     model = MODEL_FACTORIES[args.model](dropout=args.dropout).to(device)
+    _run_device_preflight(model, device, args, exp)
     model = _compile_model_if_requested(model, args, exp)
-    print_model_summary(model)
+    print_model_summary(model, raise_on_error=True)
 
     loss_obj, task_weights = _build_loss(args, is_multitask)
     optimizer = get_optimizer(model, args.optimizer, args.lr, args.weight_decay)
@@ -382,8 +505,16 @@ def main():
     exp.log(
         f"DataLoader: batch_size={args.batch_size}, accumulation_steps={args.accumulation_steps}, "
         f"effective_batch_size={args.batch_size * args.accumulation_steps}, "
-        f"num_workers={args.num_workers}, prefetch_factor={args.prefetch_factor}, "
+        f"num_workers={args.num_workers}, val_num_workers={args.val_num_workers}, "
+        f"prefetch_factor={args.prefetch_factor}, "
         f"persistent_workers={args.persistent_workers}, drop_last={args.drop_last}"
+    )
+    prefetched_batches = (
+        args.num_workers * args.prefetch_factor if args.num_workers > 0 else 0
+    )
+    exp.log(
+        f"DataLoader prefetch capacity: batches={prefetched_batches}, "
+        f"samples={prefetched_batches * args.batch_size}"
     )
     if is_multitask:
         exp.log(f"Task weights: {task_weights}")

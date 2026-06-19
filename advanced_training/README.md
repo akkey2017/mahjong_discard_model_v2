@@ -2,6 +2,11 @@
 
 大規模モデル（CoAtNet Large / ResNet Large / ViT Large）、およびマルチタスク版（打牌+リーチ+副露+和了）を学習するためのワークスペース。複数ZIPを一度に読み込み、実験ごとにディレクトリを切って管理する。
 
+> **Feature schema compatibility:** 他家の非公開手牌をマスクし、予測対象からの
+> 相対席順へ統一したため、`feature_schema_version` を持たない旧checkpointは
+> 現在のencoderと互換性がありません。旧runのResume・評価・対局利用は行わず、
+> 新しいrunとして再学習してください。
+
 ---
 
 ## ディレクトリ構成
@@ -54,10 +59,10 @@ python advanced_training/train_large.py \
 
 ### Threadripper + RTX PRO 6000 Blackwell ワークステーション例
 
-24コアCPU・大容量RAM・Blackwell GPU のような学習用ワークステーションでは、
-DataLoader を強め、BF16 AMP / TF32 / EMA を有効にした設定から始める。
-まず `--profile-batches` で数バッチだけ実測し、VRAM 使用量を見て
-`--batch-size` と `--accumulation-steps` を上げ下げする。
+24コアCPU・大容量RAM・Blackwell GPU のような学習用ワークステーションでも、
+最初から大量の DataLoader worker と先読みを有効にせず、BF16 AMP / TF32 / EMA
+を使った安全な設定から始める。まず2バッチだけ実測し、動作確認後に
+`--num-workers` と `--batch-size` を段階的に上げる。
 詳細な調整手順は [`WORKSTATION_GUIDE.md`](WORKSTATION_GUIDE.md) を参照。
 
 ```bash
@@ -65,8 +70,8 @@ python advanced_training/train_large.py \
     --data data2023.zip data2022.zip \
     --model vit_multitask_large \
     --epochs 30 \
-    --batch-size 192 \
-    --accumulation-steps 2 \
+    --batch-size 256 \
+    --accumulation-steps 1 \
     --lr 8e-5 \
     --weight-decay 1e-2 \
     --scheduler warmup_cosine \
@@ -77,13 +82,15 @@ python advanced_training/train_large.py \
     --ema-decay 0.999 \
     --fulou-negatives \
     --split-by-game \
-    --num-workers 12 \
-    --prefetch-factor 4 \
+    --num-workers 4 \
+    --prefetch-factor 2 \
     --persistent-workers \
-    --profile-batches 20
+    --profile-batches 2
 ```
 
-プロファイルで余裕があれば `--profile-batches` を外して本番実行する。
+`--profile-batches` は指定数のバッチを逐次処理し、初回バッチ、DataLoader待ち、
+GPU転送・計算の時間を表示する。正常動作を確認したら同オプションを外して本番実行し、
+worker 数を `4 → 8 → 12`、batch sizeを `256 → 384 → 512` の順に比較する。
 PyTorch 2 系で安定する環境では `--compile --compile-mode reduce-overhead`
 も追加候補。
 
@@ -113,6 +120,7 @@ PyTorch 2 系で安定する環境では `--compile --compile-mode reduce-overhe
 - `--dapai-weight`, `--riichi-weight`, `--fulou-weight`, `--gang-weight`, `--hule-weight`: マルチタスク loss の重み
 
 **システム最適化**
+- `--num-workers`, `--val-num-workers`: 学習用と検証用のDataLoader worker数
 - `--prefetch-factor`, `--persistent-workers`, `--drop-last`: DataLoader のスループット調整
 - `--tf32`, `--cudnn-benchmark`: NVIDIA GPU 向け高速化
 - `--compile`, `--compile-mode`: `torch.compile` の有効化
@@ -122,6 +130,7 @@ PyTorch 2 系で安定する環境では `--compile --compile-mode reduce-overhe
 - `--run-dir`: 実験ルート（デフォルト `runs`）
 - `--run-name`: 実行ディレクトリ名の上書き
 - `--resume`: 既存ランから再開（run dir か `last_model.pth` を指定）
+  保存済み設定を復元し、現在のCLIで明示した引数だけを上書きする
 
 ---
 
@@ -136,6 +145,8 @@ python advanced_training/evaluate_large.py \
 ```
 
 チェックポイントから自動でアーキテクチャを復元。以下を出力する:
+- 指定した評価データ全件の指標（train/valへの再分割は行わない）
+- マルチタスク時の副露負例設定はcheckpoint configから復元可能
 - Loss, Top-1/3/5 (またはマルチタスクならタスク別 accuracy/loss)
 - **Per-tile accuracy** (34 牌ごとの正答率 + 数牌/字牌別の集計)
 - **Confusion summary** (よく間違える正解→予測ペア上位)

@@ -316,16 +316,21 @@ class MahjongDataset(Dataset):
         zip_path=None,
         max_files=10000,
         samples=None,
+        kyoku_logs=None,
         verbose=True,
         collect_all_actions=False,
         include_fulou_negatives=False,
     ):
         if samples is not None:
             self.samples = samples
+            self.kyoku_logs = kyoku_logs if kyoku_logs is not None else []
             self.game_ids = [None] * len(samples)
             return
 
         self.samples = []
+        # Store each kyoku once. Samples contain a compact integer reference
+        # instead of repeating a Python reference to the full log per action.
+        self.kyoku_logs = []
         # Parallel array: source archive filename for each sample (for game-level splits)
         self.game_ids = []
 
@@ -353,12 +358,19 @@ class MahjongDataset(Dataset):
                             continue
                         game_id = name
                         for kyoku_log in game_data["log"]:
-                            for sample in _extract_samples_from_kyoku(
+                            generated = list(_extract_samples_from_kyoku(
                                 kyoku_log,
                                 collect_all_actions=collect_all_actions,
                                 include_fulou_negatives=include_fulou_negatives,
-                            ):
-                                self.samples.append(sample)
+                            ))
+                            if not generated:
+                                continue
+                            kyoku_idx = len(self.kyoku_logs)
+                            self.kyoku_logs.append(kyoku_log)
+                            for _, log_idx, p_id, action_type, label in generated:
+                                self.samples.append(
+                                    (kyoku_idx, log_idx, p_id, action_type, label)
+                                )
                                 self.game_ids.append(game_id)
                     except json.JSONDecodeError:
                         if verbose:
@@ -378,7 +390,13 @@ class MahjongDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, idx):
-        kyoku_log, log_idx, p_id, action_type, label = self.samples[idx]
+        kyoku_ref, log_idx, p_id, action_type, label = self.samples[idx]
+        # Accept legacy pre-loaded samples whose first item is the log itself.
+        kyoku_log = (
+            self.kyoku_logs[kyoku_ref]
+            if self.kyoku_logs and isinstance(kyoku_ref, int)
+            else kyoku_ref
+        )
         encoder = StateEncoderV2(kyoku_log, p_id)
         state_tensor = encoder.encode(log_idx)
         return state_tensor, label, action_type
@@ -398,7 +416,11 @@ class MahjongDataset(Dataset):
             if s[3] == action_type:
                 filtered_samples.append(s)
                 filtered_games.append(g)
-        ds = MahjongDataset(samples=filtered_samples, verbose=False)
+        ds = MahjongDataset(
+            samples=filtered_samples,
+            kyoku_logs=self.kyoku_logs,
+            verbose=False,
+        )
         ds.game_ids = filtered_games
         return ds
 
@@ -458,6 +480,7 @@ def create_dataloaders(
     persistent_workers=False,
     prefetch_factor=None,
     drop_last=False,
+    val_num_workers=None,
 ):
     """Create train and validation DataLoaders for a single-action dataset."""
     if len(dataset) == 0:
@@ -480,27 +503,35 @@ def create_dataloaders(
         train_set = torch.utils.data.Subset(dataset, train_idx)
         val_set = torch.utils.data.Subset(dataset, val_idx)
 
-    loader_kwargs = {
+    train_loader_kwargs = {
         "num_workers": num_workers,
         "pin_memory": pin_memory,
     }
     if num_workers > 0:
-        loader_kwargs["persistent_workers"] = persistent_workers
+        train_loader_kwargs["persistent_workers"] = persistent_workers
         if prefetch_factor is not None:
-            loader_kwargs["prefetch_factor"] = prefetch_factor
+            train_loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    val_workers = num_workers if val_num_workers is None else val_num_workers
+    val_loader_kwargs = {
+        "num_workers": val_workers,
+        "pin_memory": pin_memory,
+    }
+    if val_workers > 0 and prefetch_factor is not None:
+        val_loader_kwargs["prefetch_factor"] = prefetch_factor
 
     train_loader = DataLoader(
         train_set,
         batch_size=batch_size,
         shuffle=True,
         drop_last=drop_last,
-        **loader_kwargs,
+        **train_loader_kwargs,
     )
     val_loader = DataLoader(
         val_set,
         batch_size=batch_size,
         shuffle=False,
-        **loader_kwargs,
+        **val_loader_kwargs,
     )
     return train_loader, val_loader
 
@@ -516,6 +547,7 @@ def create_multitask_dataloaders(
     persistent_workers=False,
     prefetch_factor=None,
     drop_last=False,
+    val_num_workers=None,
 ):
     """Train/val DataLoaders that preserve action_type labels (list of str)."""
     if len(dataset) == 0:
@@ -538,14 +570,22 @@ def create_multitask_dataloaders(
         train_set = torch.utils.data.Subset(dataset, train_idx)
         val_set = torch.utils.data.Subset(dataset, val_idx)
 
-    loader_kwargs = {
+    train_loader_kwargs = {
         "num_workers": num_workers,
         "pin_memory": pin_memory,
     }
     if num_workers > 0:
-        loader_kwargs["persistent_workers"] = persistent_workers
+        train_loader_kwargs["persistent_workers"] = persistent_workers
         if prefetch_factor is not None:
-            loader_kwargs["prefetch_factor"] = prefetch_factor
+            train_loader_kwargs["prefetch_factor"] = prefetch_factor
+
+    val_workers = num_workers if val_num_workers is None else val_num_workers
+    val_loader_kwargs = {
+        "num_workers": val_workers,
+        "pin_memory": pin_memory,
+    }
+    if val_workers > 0 and prefetch_factor is not None:
+        val_loader_kwargs["prefetch_factor"] = prefetch_factor
 
     train_loader = DataLoader(
         train_set,
@@ -553,13 +593,13 @@ def create_multitask_dataloaders(
         shuffle=True,
         drop_last=drop_last,
         collate_fn=multitask_collate,
-        **loader_kwargs,
+        **train_loader_kwargs,
     )
     val_loader = DataLoader(
         val_set,
         batch_size=batch_size,
         shuffle=False,
         collate_fn=multitask_collate,
-        **loader_kwargs,
+        **val_loader_kwargs,
     )
     return train_loader, val_loader

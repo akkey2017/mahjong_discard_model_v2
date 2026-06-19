@@ -7,6 +7,10 @@ import torch
 # デフォルトの開始点数
 DEFAULT_STARTING_SCORES = [25000, 25000, 25000, 25000]
 
+# Checkpoints trained before this schema used absolute/misordered seats and
+# exposed opponents' concealed hands. They must not be mixed with this encoder.
+FEATURE_SCHEMA_VERSION = "private-hands-relative-seats-v1"
+
 # 37次元の牌表現（m0, p0, s0 を赤ドラとして扱う）
 # m0, m1-9, p0, p1-9, s0, s1-9, z1-7
 FEATURE_TILE_MAP = {
@@ -137,8 +141,13 @@ class StateEncoderV2:
     def encode(self, log_index_in_kyoku):
         # --- 1. 指定された局面までの状態を再現 ---
         
-        # 配牌
-        hands = [_make_pai_counter_list_from(h) for h in self.qipai['shoupai']]
+        # 配牌。予測対象以外の手牌は実戦では観測できないため、牌譜に記録されて
+        # いても特徴量へ入れない。これを残すと学習時だけ他家の手牌を見られる
+        # information leakage になる。
+        hands = [[0] * 37 for _ in range(4)]
+        hands[self.player_id] = _make_pai_counter_list_from(
+            self.qipai['shoupai'][self.player_id]
+        )
         
         dora_indicators = [FEATURE_TILE_MAP.get(self.qipai['baopai'])]
         rivers = [[], [], [], []]
@@ -154,7 +163,7 @@ class StateEncoderV2:
                 key = 'zimo' if 'zimo' in move else 'gangzimo'
                 p_id = move[key]['l']
                 tile_str = move[key]['p']
-                if tile_str in FEATURE_TILE_MAP:
+                if p_id == self.player_id and tile_str in FEATURE_TILE_MAP:
                     hands[p_id][FEATURE_TILE_MAP[tile_str]] += 1
             
             elif 'dapai' in move:
@@ -162,7 +171,8 @@ class StateEncoderV2:
                 tile_str = move['dapai']['p']
                 tile_id = FEATURE_TILE_MAP.get(tile_str.replace('*','').replace('_',''))
                 if tile_id is not None:
-                    hands[p_id][tile_id] -= 1
+                    if p_id == self.player_id:
+                        hands[p_id][tile_id] = max(0, hands[p_id][tile_id] - 1)
                     rivers[p_id].append(tile_id)
                     last_discard_info = (p_id, tile_id)  # Track most recent discard
                     if '*' in tile_str:
@@ -177,12 +187,14 @@ class StateEncoderV2:
                 # 手牌から消費された牌を減算
                 # 誰から鳴いたか特定
                 from_p_id = (p_id + 3) % 4 if '-' in meld_str else (p_id + 2) % 4 if '=' in meld_str else (p_id + 1) % 4
-                taken_tile = rivers[from_p_id].pop()
+                taken_tile = rivers[from_p_id].pop() if rivers[from_p_id] else None
                 
                 consumed_tiles = meld_tiles.copy()
-                consumed_tiles.remove(taken_tile)
-                for tile in consumed_tiles:
-                    hands[p_id][tile] -=1
+                if taken_tile in consumed_tiles:
+                    consumed_tiles.remove(taken_tile)
+                if p_id == self.player_id:
+                    for tile in consumed_tiles:
+                        hands[p_id][tile] = max(0, hands[p_id][tile] - 1)
 
             elif 'gang' in move:
                 p_id = move['gang']['l']
@@ -191,7 +203,8 @@ class StateEncoderV2:
                 
                 if any(c in meld_str for c in '-+='): # 加槓
                     kakan_tile = meld_tiles[0]
-                    hands[p_id][kakan_tile] -= 1
+                    if p_id == self.player_id:
+                        hands[p_id][kakan_tile] = max(0, hands[p_id][kakan_tile] - 1)
                     # 既存のポンをカンに更新
                     for m in melds[p_id]:
                         if len(m) == 3 and m[0] == kakan_tile:
@@ -199,8 +212,9 @@ class StateEncoderV2:
                             break
                 else: # 暗槓
                     ankan[p_id].append(meld_tiles)
-                    for tile in meld_tiles:
-                        hands[p_id][tile] -= 1
+                    if p_id == self.player_id:
+                        for tile in meld_tiles:
+                            hands[p_id][tile] = max(0, hands[p_id][tile] - 1)
             
             elif 'kaigang' in move:
                 dora_indicators.append(FEATURE_TILE_MAP.get(move['kaigang']['baopai']))
@@ -209,8 +223,10 @@ class StateEncoderV2:
         final_tensor = np.zeros((self.num_channels, 4, 9), dtype=np.float32)
         ch_offset = 0
 
-        # 各プレイヤーの相対位置を計算
-        player_indices = [self._get_player_offset(i) for i in range(4)]
+        # 予測対象を常に先頭にし、下家・対面・上家の順で実プレイヤーIDを並べる。
+        # _get_player_offset() の戻り値は「相対位置」であり、hands/rivers等を
+        # 参照する実IDとして使ってはいけない。
+        player_indices = [(self.player_id + offset) % 4 for offset in range(4)]
         
         # A. 手牌 (7ch * 4人 = 28ch)
         for p_idx in player_indices:
@@ -282,7 +298,9 @@ class StateEncoderV2:
         # I. 自風 (座席風) (4ch * 4人 = 16ch) - Player seat winds (one-hot)
         # Each player has a seat wind: East=0, South=1, West=2, North=3
         for p_idx in player_indices:
-            seat_wind = (self.qipai['jushu'] + p_idx) % 4
+            # jushu identifies the dealer seat; seat wind is the player's
+            # offset from that dealer, not their sum.
+            seat_wind = (p_idx - self.qipai['jushu']) % 4
             final_tensor[ch_offset + seat_wind, :, :] = 1.0
             ch_offset += 4
         
