@@ -455,6 +455,9 @@ def create_dataloaders(
     pin_memory=True,
     seed=42,
     split_by_game=False,
+    persistent_workers=False,
+    prefetch_factor=None,
+    drop_last=False,
 ):
     """Create train and validation DataLoaders for a single-action dataset."""
     if len(dataset) == 0:
@@ -477,19 +480,27 @@ def create_dataloaders(
         train_set = torch.utils.data.Subset(dataset, train_idx)
         val_set = torch.utils.data.Subset(dataset, val_idx)
 
+    loader_kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+
     train_loader = DataLoader(
         train_set,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
+        drop_last=drop_last,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_set,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
+        **loader_kwargs,
     )
     return train_loader, val_loader
 
@@ -502,6 +513,9 @@ def create_multitask_dataloaders(
     pin_memory=True,
     seed=42,
     split_by_game=False,
+    persistent_workers=False,
+    prefetch_factor=None,
+    drop_last=False,
 ):
     """Train/val DataLoaders that preserve action_type labels (list of str)."""
     if len(dataset) == 0:
@@ -524,20 +538,28 @@ def create_multitask_dataloaders(
         train_set = torch.utils.data.Subset(dataset, train_idx)
         val_set = torch.utils.data.Subset(dataset, val_idx)
 
+    loader_kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+    }
+    if num_workers > 0:
+        loader_kwargs["persistent_workers"] = persistent_workers
+        if prefetch_factor is not None:
+            loader_kwargs["prefetch_factor"] = prefetch_factor
+
     train_loader = DataLoader(
         train_set,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
+        drop_last=drop_last,
         collate_fn=multitask_collate,
+        **loader_kwargs,
     )
     val_loader = DataLoader(
         val_set,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
         collate_fn=multitask_collate,
+        **loader_kwargs,
     )
     return train_loader, val_loader

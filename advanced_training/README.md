@@ -52,6 +52,41 @@ python advanced_training/train_large.py \
 
 `--fulou-negatives` で「鳴けたのに鳴かなかった」負例を自動生成する。
 
+### Threadripper + RTX PRO 6000 Blackwell ワークステーション例
+
+24コアCPU・大容量RAM・Blackwell GPU のような学習用ワークステーションでは、
+DataLoader を強め、BF16 AMP / TF32 / EMA を有効にした設定から始める。
+まず `--profile-batches` で数バッチだけ実測し、VRAM 使用量を見て
+`--batch-size` と `--accumulation-steps` を上げ下げする。
+詳細な調整手順は [`WORKSTATION_GUIDE.md`](WORKSTATION_GUIDE.md) を参照。
+
+```bash
+python advanced_training/train_large.py \
+    --data data2023.zip data2022.zip \
+    --model vit_multitask_large \
+    --epochs 30 \
+    --batch-size 192 \
+    --accumulation-steps 2 \
+    --lr 8e-5 \
+    --weight-decay 1e-2 \
+    --scheduler warmup_cosine \
+    --warmup-epochs 3 \
+    --amp \
+    --amp-dtype bf16 \
+    --tf32 \
+    --ema-decay 0.999 \
+    --fulou-negatives \
+    --split-by-game \
+    --num-workers 12 \
+    --prefetch-factor 4 \
+    --persistent-workers \
+    --profile-batches 20
+```
+
+プロファイルで余裕があれば `--profile-batches` を外して本番実行する。
+PyTorch 2 系で安定する環境では `--compile --compile-mode reduce-overhead`
+も追加候補。
+
 ### 主な引数
 
 **データ**
@@ -72,7 +107,16 @@ python advanced_training/train_large.py \
 - `--max-grad-norm`: 勾配クリップ閾値
 - `--accumulation-steps`: 勾配累積ステップ数（実効バッチサイズ拡大）
 - `--amp`: mixed precision (AMP) 有効化
+- `--amp-dtype`: AMP の dtype (`bf16` / `fp16` / `auto`)
 - `--ema-decay`: EMAの減衰率（0で無効）
+- `--monitor-metric`: best checkpoint / early stopping に使う検証指標
+- `--dapai-weight`, `--riichi-weight`, `--fulou-weight`, `--gang-weight`, `--hule-weight`: マルチタスク loss の重み
+
+**システム最適化**
+- `--prefetch-factor`, `--persistent-workers`, `--drop-last`: DataLoader のスループット調整
+- `--tf32`, `--cudnn-benchmark`: NVIDIA GPU 向け高速化
+- `--compile`, `--compile-mode`: `torch.compile` の有効化
+- `--profile-batches`: 指定バッチ数だけ学習して samples/sec とピークVRAMをログ出力
 
 **実験管理**
 - `--run-dir`: 実験ルート（デフォルト `runs`）
