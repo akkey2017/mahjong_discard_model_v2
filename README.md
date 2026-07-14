@@ -77,6 +77,27 @@ mahjong_discard_model_v2/
 
 ## 🚀 使い方
 
+### 0. データセット規模のスキャン
+
+学習前に、ZIPをRAMへ全展開せず、対局・局・イベント・task候補数、
+不正JSON率、年別・ルール別統計、およびcompact prepared形式の推定容量を集計できます。
+
+```bash
+python scripts/scan_dataset.py data/raw \
+  --workers 1 12 \
+  --output reports/dataset_scan.json
+```
+
+`--workers 1 12` は同じ入力を1 workerと12 workersで走査して速度を比較します。
+最後に指定したworker数の集計がレポート本体へ入り、全測定値は
+`benchmarks` に保存されます。短時間の動作確認には `--max-files 10000` を使えます。
+
+容量推定は初期compact schema案（event 8 bytes、round 256 bytes、offset 8 bytes、
+game metadata 64 bytes、圧縮なし）に基づきます。これらは
+`--event-bytes` などで実測値へ差し替えられます。副露・槓・和了については、
+scannerは高速性を優先して観測された正例だけを数え、合法な見送り候補の計数は
+状態再生が必要な後続Phaseで行います。
+
 ### 1. トレーニング
 
 #### 基本的な使い方（CoAtNet）
