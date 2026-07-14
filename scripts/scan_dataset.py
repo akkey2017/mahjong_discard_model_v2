@@ -86,11 +86,14 @@ def _rule_label(game: dict) -> str:
 
 
 def _year_label(archive: str, member: str, game: dict) -> str:
+    # The archive name is authoritative for the raw yearly dumps.  Some older
+    # archives contain member names with unrelated 20xx fragments, which would
+    # otherwise inflate the number of observed years and corrupt projections.
     for candidate in (
         game.get("year"),
-        game.get("date"),
-        member,
         Path(archive).name,
+        member,
+        game.get("date"),
     ):
         if candidate is None:
             continue

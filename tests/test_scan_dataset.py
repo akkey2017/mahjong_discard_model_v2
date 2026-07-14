@@ -9,6 +9,7 @@ from pathlib import Path
 from scripts.scan_dataset import (
     EstimateConfig,
     _member_index,
+    _year_label,
     build_report,
     discover_archives,
     scan_index,
@@ -62,6 +63,19 @@ class DatasetScannerTests(unittest.TestCase):
         self.assertEqual(counts["task_positives"]["riichi"], 2)
         self.assertEqual(counts["years"]["2023"], 2)
         self.assertGreaterEqual(elapsed, 0.0)
+
+    def test_archive_year_wins_over_unrelated_member_or_date_year(self):
+        game = {"date": "2099-01-01"}
+        self.assertEqual(
+            _year_label("/raw/data2014.zip", "logs/2050-game.json", game),
+            "2014",
+        )
+
+    def test_explicit_game_year_wins_over_archive_year(self):
+        self.assertEqual(
+            _year_label("/raw/data2014.zip", "game.json", {"year": "2013"}),
+            "2013",
+        )
 
     def test_parallel_scan_matches_single_process(self):
         indexed = _member_index([self.archive], None)
