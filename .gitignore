@@ -45,12 +45,16 @@ env/
 # Data files
 *.zip
 data*/
+!mahjong_ai/data/
+!mahjong_ai/data/*.py
 *.txt
 *.json
+!workstation_autotune.json
 
 # Logs
 *.log
 logs/
+/runs/
 wandb/
 tensorboard/
 

@@ -27,6 +27,20 @@ def _amp_device_type(device):
     return "cpu"
 
 
+def resolve_amp_dtype(device, amp_dtype="auto"):
+    """Return the autocast dtype for the requested mixed-precision mode."""
+    mode = (amp_dtype or "auto").lower()
+    if mode == "auto":
+        return None
+    if mode == "fp16":
+        return torch.float16
+    if mode == "bf16":
+        return torch.bfloat16
+    if mode == "fp32":
+        return torch.float32
+    raise ValueError(f"Unsupported amp dtype: {amp_dtype}")
+
+
 class TopKAccuracy:
     """Calculate top-k accuracy metric."""
     
@@ -278,6 +292,7 @@ def train_one_epoch(
     max_grad_norm=None,
     scaler=None,
     use_amp=False,
+    amp_dtype="auto",
     accumulation_steps=1,
     ema=None,
 ):
@@ -308,6 +323,7 @@ def train_one_epoch(
     samples_in_window = 0       # total samples whose loss was accumulated
 
     amp_device_type = _amp_device_type(device)
+    autocast_dtype = resolve_amp_dtype(device, amp_dtype)
 
     def _flush_gradients(sample_count):
         # Normalize the accumulated gradients by the total number of samples
@@ -338,7 +354,9 @@ def train_one_epoch(
     for step, (xb, yb, _) in enumerate(pbar):
         xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
 
-        with torch.amp.autocast(device_type=amp_device_type, enabled=use_amp):
+        with torch.amp.autocast(
+            device_type=amp_device_type, enabled=use_amp, dtype=autocast_dtype
+        ):
             out = model(xb)
             loss = loss_fn(out, yb)
 
@@ -369,7 +387,7 @@ def train_one_epoch(
     return total_loss / num_batches if num_batches > 0 else 0.0
 
 
-def evaluate(model, val_loader, loss_fn, device, metrics=None, use_amp=False):
+def evaluate(model, val_loader, loss_fn, device, metrics=None, use_amp=False, amp_dtype="auto"):
     """
     Evaluate the model.
 
@@ -388,6 +406,7 @@ def evaluate(model, val_loader, loss_fn, device, metrics=None, use_amp=False):
     total_loss = 0.0
     num_batches = 0
     amp_device_type = _amp_device_type(device)
+    autocast_dtype = resolve_amp_dtype(device, amp_dtype)
 
     # Reset metrics
     if metrics:
@@ -400,7 +419,9 @@ def evaluate(model, val_loader, loss_fn, device, metrics=None, use_amp=False):
         for xb, yb, _ in pbar:
             xb, yb = xb.to(device, non_blocking=True), yb.to(device, non_blocking=True)
 
-            with torch.amp.autocast(device_type=amp_device_type, enabled=use_amp):
+            with torch.amp.autocast(
+                device_type=amp_device_type, enabled=use_amp, dtype=autocast_dtype
+            ):
                 out = model(xb)
                 loss = loss_fn(out, yb)
             
@@ -434,7 +455,7 @@ def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
 
-def print_model_summary(model, input_shape=(1, 380, 4, 9)):
+def print_model_summary(model, input_shape=(1, 380, 4, 9), raise_on_error=False):
     """
     Print a summary of the model architecture.
 
@@ -460,6 +481,8 @@ def print_model_summary(model, input_shape=(1, 380, 4, 9)):
             print(f"Output shape: {tuple(output.shape)}")
     except Exception as e:
         print(f"Could not determine output shape: {e}")
+        if raise_on_error:
+            raise
 
     print(f"{'='*60}\n")
 
@@ -475,7 +498,11 @@ class ModelEMA:
     def __init__(self, model, decay=0.9999):
         import copy
         self.decay = decay
-        self.ema = copy.deepcopy(model).eval()
+        # Keep EMA independent from torch.compile's OptimizedModule wrapper.
+        # The wrapper is an execution detail and is not guaranteed to deepcopy
+        # cleanly or expose the same parameter-name prefix across versions.
+        source_model = getattr(model, "_orig_mod", model)
+        self.ema = copy.deepcopy(source_model).eval()
         for p in self.ema.parameters():
             p.requires_grad_(False)
 
@@ -485,7 +512,8 @@ class ModelEMA:
         # running_mean / running_var / num_batches_tracked) already maintain
         # their own running statistics and should be copied verbatim — EMA
         # averaging would distort those statistics and hurt evaluation.
-        model_params = dict(model.named_parameters())
+        source_model = getattr(model, "_orig_mod", model)
+        model_params = dict(source_model.named_parameters())
         for k, v in self.ema.named_parameters():
             src = model_params[k].detach()
             if v.dtype.is_floating_point:
@@ -493,7 +521,7 @@ class ModelEMA:
             else:
                 v.copy_(src)
 
-        model_buffers = dict(model.named_buffers())
+        model_buffers = dict(source_model.named_buffers())
         for k, v in self.ema.named_buffers():
             v.copy_(model_buffers[k].detach())
 
@@ -508,6 +536,7 @@ def train_one_epoch_multitask(
     max_grad_norm=None,
     scaler=None,
     use_amp=False,
+    amp_dtype="auto",
     accumulation_steps=1,
     ema=None,
 ):
@@ -531,6 +560,8 @@ def train_one_epoch_multitask(
     microbatches_in_window = 0  # actual micro-batches accumulated since last step
     samples_in_window = 0       # total samples whose loss was accumulated
     amp_device_type = _amp_device_type(device)
+    autocast_dtype = resolve_amp_dtype(device, amp_dtype)
+    model_heads = getattr(model, "_orig_mod", model).heads
 
     def _flush_gradients(sample_count):
         # Normalize accumulated gradients by the total number of contributing
@@ -572,11 +603,13 @@ def train_one_epoch_multitask(
         for i, a in enumerate(actions):
             per_task_idx.setdefault(a, []).append(i)
 
-        active_tasks = [t for t in per_task_idx if t in model.heads]
+        active_tasks = [t for t in per_task_idx if t in model_heads]
         if not active_tasks:
             continue
 
-        with torch.amp.autocast(device_type=amp_device_type, enabled=use_amp):
+        with torch.amp.autocast(
+            device_type=amp_device_type, enabled=use_amp, dtype=autocast_dtype
+        ):
             logits_all = model(xb, head_names=active_tasks)
             loss_total = None
             micro_samples = 0
@@ -625,7 +658,9 @@ def train_one_epoch_multitask(
     return total_loss / num_batches if num_batches > 0 else 0.0
 
 
-def evaluate_multitask(model, val_loader, loss_fns, device, task_weights=None, use_amp=False):
+def evaluate_multitask(
+    model, val_loader, loss_fns, device, task_weights=None, use_amp=False, amp_dtype="auto"
+):
     """Multi-task evaluation. Returns per-task loss and top-1 accuracy.
 
     Per-task losses are sample-weighted: each batch's per-task loss (a mean
@@ -636,6 +671,8 @@ def evaluate_multitask(model, val_loader, loss_fns, device, task_weights=None, u
     model.eval()
     task_weights = task_weights or {}
     amp_device_type = _amp_device_type(device)
+    autocast_dtype = resolve_amp_dtype(device, amp_dtype)
+    model_heads = getattr(model, "_orig_mod", model).heads
 
     per_task_correct = {}
     per_task_total = {}
@@ -655,11 +692,13 @@ def evaluate_multitask(model, val_loader, loss_fns, device, task_weights=None, u
             for i, a in enumerate(actions):
                 per_task_idx.setdefault(a, []).append(i)
 
-            active_tasks = [t for t in per_task_idx if t in model.heads]
+            active_tasks = [t for t in per_task_idx if t in model_heads]
             if not active_tasks:
                 continue
 
-            with torch.amp.autocast(device_type=amp_device_type, enabled=use_amp):
+            with torch.amp.autocast(
+                device_type=amp_device_type, enabled=use_amp, dtype=autocast_dtype
+            ):
                 logits_all = model(xb, head_names=active_tasks)
                 for task in active_tasks:
                     idx = torch.tensor(per_task_idx[task], device=device, dtype=torch.long)
@@ -679,8 +718,14 @@ def evaluate_multitask(model, val_loader, loss_fns, device, task_weights=None, u
                     per_task_total[task] = per_task_total.get(task, 0) + n
 
     results = {}
-    total_samples = sum(per_task_total.values()) or 1
-    overall_correct = sum(per_task_correct.values())
+    # A disabled head (notably hule with weight=0 until negative examples are
+    # available) must not affect the metric used for checkpoint selection.
+    monitored_tasks = {
+        task for task in per_task_total
+        if float(task_weights.get(task, 1.0)) > 0.0
+    }
+    total_samples = sum(per_task_total[t] for t in monitored_tasks) or 1
+    overall_correct = sum(per_task_correct.get(t, 0) for t in monitored_tasks)
     results["top1_acc"] = overall_correct / total_samples
     for task, total in per_task_total.items():
         acc = per_task_correct[task] / total if total else 0.0
@@ -689,6 +734,7 @@ def evaluate_multitask(model, val_loader, loss_fns, device, task_weights=None, u
         results[f"{task}_acc"] = acc
         results[f"{task}_loss"] = avg_loss
         results[f"{task}_total"] = total
-    overall_loss_samples = sum(per_task_loss_samples.values())
-    results["loss"] = (sum(per_task_loss_sum.values()) / overall_loss_samples) if overall_loss_samples else 0.0
+    overall_loss_samples = sum(per_task_loss_samples.get(t, 0) for t in monitored_tasks)
+    weighted_loss_sum = sum(per_task_loss_sum.get(t, 0.0) for t in monitored_tasks)
+    results["loss"] = (weighted_loss_sum / overall_loss_samples) if overall_loss_samples else 0.0
     return results

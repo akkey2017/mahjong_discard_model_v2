@@ -33,6 +33,7 @@ class MultiZipMahjongDataset(MahjongDataset):
 
         combined_samples = []
         combined_game_ids = []
+        combined_kyoku_logs = []
         self.source_counts = {}
 
         for path in resolved_paths:
@@ -46,7 +47,15 @@ class MultiZipMahjongDataset(MahjongDataset):
                 collect_all_actions=collect_all_actions,
                 include_fulou_negatives=include_fulou_negatives,
             )
-            combined_samples.extend(dataset.samples)
+            kyoku_offset = len(combined_kyoku_logs)
+            combined_kyoku_logs.extend(dataset.kyoku_logs)
+            for sample in dataset.samples:
+                kyoku_ref, log_idx, p_id, action_type, label = sample
+                if dataset.kyoku_logs and isinstance(kyoku_ref, int):
+                    kyoku_ref += kyoku_offset
+                combined_samples.append(
+                    (kyoku_ref, log_idx, p_id, action_type, label)
+                )
             # Prefix game ids with source archive so they're unique across zips
             combined_game_ids.extend(
                 f"{path.name}::{gid}" for gid in dataset.game_ids
@@ -54,7 +63,11 @@ class MultiZipMahjongDataset(MahjongDataset):
             self.source_counts[str(path)] = len(dataset)
 
         # Initialize parent with the aggregated samples
-        super().__init__(samples=combined_samples, verbose=False)
+        super().__init__(
+            samples=combined_samples,
+            kyoku_logs=combined_kyoku_logs,
+            verbose=False,
+        )
         self.game_ids = combined_game_ids
 
     def get_statistics(self):

@@ -16,7 +16,7 @@ import sys
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import random_split
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 # Ensure repository root is importable when running as a script
@@ -25,8 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from dataset import (  # noqa: E402
-    create_dataloaders,
-    create_multitask_dataloaders,
+    multitask_collate,
 )
 from utils import (  # noqa: E402
     TopKAccuracy,
@@ -36,6 +35,7 @@ from utils import (  # noqa: E402
 )
 from advanced_training.large_models import MODEL_FACTORIES, MULTITASK_MODELS  # noqa: E402
 from advanced_training.multizip_dataset import MultiZipMahjongDataset  # noqa: E402
+from mahjong_ai_features import FEATURE_SCHEMA_VERSION  # noqa: E402
 
 
 ID_TO_TILE_34 = {
@@ -87,10 +87,14 @@ def parse_args():
     parser.add_argument("--show-demo", action="store_true")
     parser.add_argument("--num-demo-samples", type=int, default=5)
     parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--train-ratio", type=float, default=0.9)
     parser.add_argument("--output-csv", type=str, default=None,
                         help="Write per-tile accuracy table to this CSV file.")
-    parser.add_argument("--split-by-game", action="store_true")
+    parser.add_argument(
+        "--fulou-negatives",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Include fulou pass negatives. Defaults to the checkpoint config.",
+    )
     return parser.parse_args()
 
 
@@ -231,6 +235,7 @@ def _print_confusion_summary(confusion, top_k_errors=15):
 
 def main():
     args = parse_args()
+    torch.manual_seed(args.seed)
     device = ("cuda" if torch.cuda.is_available() else "cpu") if args.device == "auto" else args.device
     print(f"Using device: {device}")
 
@@ -238,6 +243,14 @@ def main():
     if not Path(args.model_path).exists():
         raise FileNotFoundError(f"Model file not found: {args.model_path}")
     payload = load_checkpoint(args.model_path, map_location=device)
+    saved_config = payload.get("config", {})
+    saved_schema = saved_config.get("feature_schema_version")
+    if saved_schema != FEATURE_SCHEMA_VERSION:
+        raise RuntimeError(
+            "Checkpoint feature schema is incompatible with the corrected encoder "
+            f"(saved={saved_schema!r}, required={FEATURE_SCHEMA_VERSION!r}). "
+            "Retrain the model before evaluation."
+        )
     model_type = _resolve_model_type(args, payload)
     is_multitask = model_type in MULTITASK_MODELS
 
@@ -253,38 +266,34 @@ def main():
     model.to(device).eval()
 
     # ---- Dataset ----
+    fulou_negatives = args.fulou_negatives
+    if fulou_negatives is None:
+        fulou_negatives = bool(saved_config.get("fulou_negatives", False))
     full_dataset = MultiZipMahjongDataset(
         zip_paths=args.data,
         max_files_per_zip=args.max_files_per_zip,
         verbose=True,
         collect_all_actions=is_multitask,
+        include_fulou_negatives=is_multitask and fulou_negatives,
     )
     stats = full_dataset.get_statistics()
     print(f"Combined samples: {len(full_dataset)}")
     print(f"Per-archive counts: {stats.get('source_counts', {})}")
     print(f"Action counts: {stats.get('action_counts', {})}")
 
+    evaluation_dataset = full_dataset if is_multitask else full_dataset.filter_by_action("dapai")
+    if len(evaluation_dataset) == 0:
+        raise RuntimeError("No evaluation samples found in the supplied data.")
+    loader_kwargs = {
+        "batch_size": args.batch_size,
+        "shuffle": False,
+        "num_workers": args.num_workers,
+        "pin_memory": str(device).split(":", 1)[0] == "cuda",
+    }
     if is_multitask:
-        _, val_loader = create_multitask_dataloaders(
-            full_dataset,
-            train_ratio=args.train_ratio,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            seed=args.seed,
-            split_by_game=args.split_by_game,
-        )
-    else:
-        discard_dataset = full_dataset.filter_by_action("dapai")
-        if len(discard_dataset) == 0:
-            raise RuntimeError("No dapai samples found in evaluation data.")
-        _, val_loader = create_dataloaders(
-            discard_dataset,
-            train_ratio=args.train_ratio,
-            batch_size=args.batch_size,
-            num_workers=args.num_workers,
-            seed=args.seed,
-            split_by_game=args.split_by_game,
-        )
+        loader_kwargs["collate_fn"] = multitask_collate
+    val_loader = DataLoader(evaluation_dataset, **loader_kwargs)
+    print(f"Evaluating all {len(evaluation_dataset)} samples")
 
     # ---- Aggregate metrics ----
     loss_fn = nn.CrossEntropyLoss()
@@ -293,12 +302,21 @@ def main():
     top5 = TopKAccuracy(k=5)
 
     if is_multitask:
+        task_weights = {
+            "dapai": float(saved_config.get("dapai_weight", 1.0)),
+            "riichi": float(saved_config.get("riichi_weight", 0.5)),
+            "fulou": float(saved_config.get("fulou_weight", 0.4)),
+            "gang": float(saved_config.get("gang_weight", 0.3)),
+            "hule": float(saved_config.get("hule_weight", 0.0)),
+        }
         loss_fns = {
             k: nn.CrossEntropyLoss()
             for k in ["dapai", "riichi", "fulou", "gang", "hule"]
         }
         loss_fns["_default"] = nn.CrossEntropyLoss()
-        results = evaluate_multitask(model, val_loader, loss_fns, device)
+        results = evaluate_multitask(
+            model, val_loader, loss_fns, device, task_weights=task_weights
+        )
         print("\n" + "=" * 60)
         print("Multi-task results")
         print("=" * 60)
@@ -332,13 +350,8 @@ def main():
 
     # ---- Optional demo ----
     if args.show_demo:
-        # Need a plain val Subset for demo; reuse val_loader's dataset
-        generator = torch.Generator().manual_seed(args.seed)
-        base = full_dataset.filter_by_action("dapai") if not is_multitask else full_dataset
-        train_size = int(len(base) * args.train_ratio)
-        val_size = len(base) - train_size
-        _, val_set = random_split(base, [train_size, val_size], generator=generator)
-        _run_demo(model, val_set, device, args.num_demo_samples)
+        demo_set = full_dataset.filter_by_action("dapai")
+        _run_demo(model, demo_set, device, args.num_demo_samples)
 
 
 if __name__ == "__main__":
